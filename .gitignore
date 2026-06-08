@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行期生成的便利贴笔记（不应进入版本库）
+my_memory.md
+
+# 编辑器/系统
+.DS_Store
+.idea/
+.vscode/
