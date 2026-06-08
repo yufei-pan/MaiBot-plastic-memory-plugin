@@ -25,6 +25,15 @@
 
 本插件除 `maibot-plugin-sdk` 外没有额外的第三方依赖。
 
+## 所需能力（`_manifest.json`）
+
+插件在 `_manifest.json` 中声明以下 Host 能力，用于压缩时读取全局人格配置并调用 LLM：
+
+- **`config.get`** — 读取 `bot.nickname`、`personality.personality`、`personality.reply_style`
+- **`llm.generate`** — 执行便利贴压缩重写
+
+若 `capabilities` 为空，Host 不会为该插件签发能力令牌，后台/同步压缩调用 `ctx.config` 或 `ctx.llm` 时会报 `E_CAPABILITY_DENIED`。
+
 ## 工具说明
 
 ### `append_note(content)`
@@ -58,7 +67,7 @@
 - `**max_compact_attempts**` — 单次压缩中结果仍超限时允许递归重压缩的最大次数（防止死循环）。默认 `3`。
 - `**compact_model**` — 执行压缩时使用的 LLM 模型任务名。默认 `"planner"`（即复用 planner 任务的模型）。
 - `**compact_temperature**` — 执行压缩时的采样温度。默认 `0.3`。
-- `**compact_max_tokens**` — 压缩 LLM 调用的最大 token 数。默认 `0`，表示自动按 `size_limit` 的两倍计算；若手动设置的值小于 `size_limit`，会在日志中打印告警。
+- `**compact_max_tokens**` — 压缩 LLM 调用的最大 token 数。默认 `0`，表示自动按 `size_limit` 的**八倍**计算（为推理模型的 reasoning token 预留空间）；若手动设置的值小于 `size_limit`，会在日志中打印告警。
 - `**hook_timeout_ms**` — 注入 Hook 处理器的超时时间（毫秒）。默认 `60000`（60 秒）。
 - `**injection_template**` — 注入到系统提示词之后的模板。占位符：`{note}`、`{used}`、`{free}`、`{size_limit}`。
 - `**compact_prompt_template**` — 压缩时发给 LLM 的提示词模板。占位符：`{nickname}`、`{personality}`、`{reply_style}`、`{size_limit}`、`{used}`、`{note}`。
@@ -73,6 +82,15 @@
   插件在这两个 Hook 中读取便利贴，并把它作为一条 `user` 消息插入到最后一条 `system` 消息之后。
 - 压缩时，插件从宿主全局配置读取 `bot.nickname`、`personality.personality`、`personality.reply_style`，让 LLM 以麦麦的身份与风格重写笔记。
 
+### 压缩时的 max_tokens 与长度重试
+
+- **`compact_max_tokens = 0`（默认）**：自动使用 `size_limit × 8` 作为本次压缩 LLM 调用的初始 `max_tokens` 上限（推理模型可能在 `reasoning` 阶段消耗大量 token）。
+- **`compact_max_tokens > 0`**：使用你配置的固定值；若小于 `size_limit`，会在日志中告警。
+- **长度触顶重试**：每次压缩 LLM 调用后，插件会尝试判断是否因输出被截断而需要重试：
+  - 若 Host 返回了 `finish_reason`（当前 MaiBot 能力层通常**尚未暴露**该字段），则优先依据 `finish_reason`（如 `length`、`max_tokens`）判断；
+  - 否则使用启发式：若返回笔记字符数 **小于 `size_limit` 的 80%**，视为可能被截断。
+- 若判定需要重试，插件会**临时将本次调用的 `max_tokens` 翻倍**并用相同 prompt **重试**，最多 **3** 次（加上首次调用，最多共 **4** 次）。若多次调用都未得到理想结果，最终**选用字符数最长的那次响应**写入便利贴。该放大仅作用于当前这一次压缩调用，不会写回 `config.toml`。
+
 ## 常见问题
 
 **便利贴文件存在哪里？**
@@ -83,6 +101,9 @@
 
 **压缩会一直循环吗？**
 不会。压缩存在 `max_compact_attempts` 上限；即使多次压缩仍超限，也会写入"目前最短"的结果后停止。
+
+**插件能读取 LLM 的 finish_reason 吗？**
+当前 MaiBot 的 `ctx.llm.generate` 能力返回值通常**不包含** `finish_reason`。插件已实现对该字段的优先检测（以便 Host 将来暴露时自动生效），并在缺失时回退到「返回笔记少于 `size_limit` 的 80% 则视为可能被截断」的启发式；若判定需要重试，会临时翻倍 `max_tokens` 并重试（最多 3 次，共最多 4 次调用），最终选用最长响应。
 
 ## 许可证
 

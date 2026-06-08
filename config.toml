@@ -23,8 +23,10 @@ max_compact_attempts = 3
 compact_model = "planner"
 # 执行压缩时的采样温度。
 compact_temperature = 0.3
-# 压缩 LLM 调用的最大 token 数；0 表示自动按 size_limit 的两倍计算。
-# 若该值小于 size_limit 会在日志中告警。
+# 压缩 LLM 调用的最大 token 数；0 表示自动按 size_limit 的八倍计算
+# （为推理模型的 reasoning token 预留空间）。若该值小于 size_limit 会在日志中告警。
+# 若返回笔记少于 size_limit 的 80%，视为可能被截断，会临时将 max_tokens 翻倍并重试（最多 3 次）；
+# 多次调用后会选用最长的那次响应。
 compact_max_tokens = 0
 # 注入 Hook 处理器的超时时间（毫秒），默认 60000（60 秒）。
 hook_timeout_ms = 60000
