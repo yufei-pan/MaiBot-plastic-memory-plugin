@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
-  "id": "com.yufei-pan.plastic-memory",
-  "version": "0.1.0",
+  "id": "com.0-hz.plastic-memory",
+  "version": "0.1.1",
   "name": "塑料内存条 (Plastic Memory)",
   "description": "为麦麦提供一张可自行管理的便利贴笔记（my_memory.md），并在每次 planner / 时机判断 / replyer 请求的系统提示词之后注入笔记内容与剩余空间，供麦麦随时给自己留言备忘。",
   "author": {
@@ -10,7 +10,10 @@
   },
   "license": "MIT",
   "urls": {
-    "repository": "https://github.com/yufei-pan/MaiBot-plastic-memory-plugin"
+    "repository": "https://github.com/yufei-pan/MaiBot-plastic-memory-plugin",
+    "homepage": "https://github.com/yufei-pan/MaiBot-plastic-memory-plugin",
+    "documentation": "https://github.com/yufei-pan/MaiBot-plastic-memory-plugin/blob/main/README.md",
+    "issues": "https://github.com/yufei-pan/MaiBot-plastic-memory-plugin/issues"
   },
   "host_application": {
     "min_version": "1.0.0",
