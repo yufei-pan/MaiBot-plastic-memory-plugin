@@ -1,111 +1,198 @@
 # ~~塑料内存条~~ 便利贴笔记 (Plastic Memory)
 
-一个 MaiBot 第三方插件，为麦麦提供一张**可以自己管理的便利贴笔记**（`my_memory.md`）。
+MaiBot 的记忆系统没法让麦麦随手写一段「便条」，并在之后每次思考、回复时一起带上。这个插件补的就是这块：给 LLM 一张**可以自己维护的便利贴**。
 
-麦麦现有的记忆系统不允许它直接写一段"便条"，并在每次思考/回复时随请求一起带上。这个插件就是给 LLM 的一张便利贴：它可以随时给自己留言备忘，并在之后的对话中看到这些内容。
+- **全局便利贴**（`my_memory.md`）：所有聊天流共享
+- **本聊天流便利贴**（`chat_notes/<stream_id>.md`）：只在当前聊天流可见
 
-> 过了81920小时并不会自动清空
+> [!NOTE]
+> 过了 81920 小时也不会自动清空。
 
-## 功能特性
+---
 
-- **自动注入**：在每次 planner（规划）/ 时机判断 / replyer（回复）请求的**系统提示词之后**，自动把整张便利贴的内容注入进去，同时告知还剩多少可用空间（`size_limit - 当前字符数`）。
-- **自管理工具**：麦麦可通过三个工具自行维护便利贴：
-  - `append_note`：在便利贴末尾追加内容。
-  - `rewrite_note`：用新内容完全覆盖整张便利贴。
-  - `compact_notes`：主动压缩便利贴（同步阻塞）。
-- **自动压缩**：当便利贴超过字符上限时，会自动触发一次基于 LLM 的压缩重写，让它回到上限以内。压缩时会以麦麦的人格与表达风格进行。
+## 能做什么
 
-> 重写时默认调用planner模型，可以在设置内改为utils模型。如果便贴最大大小设置的比较大，如果还使用的思考模型，请注意token消耗量！
+**自动注入**  
+在 planner（规划）、时机判断、replyer（回复）请求里，插件会在系统提示词之后插入便利贴内容，并附带已用/上限等用量信息。
 
-> 笔记内容建议使用 Markdown 书写，工具提示中也会这样引导麦麦，但插件**不强制**校验格式。
+**三个维护工具**  
+麦麦可以用 `append_note`、`rewrite_note`、`compact_notes` 自己管理笔记。三个工具都支持可选参数 `scope`：
+
+- `global`（默认）→ 全局便利贴
+- `stream` → 仅当前聊天流便利贴（stream id 由插件从上下文解析，**不能**指定其他聊天流）
+
+**自动压缩**  
+笔记超过字符上限时，会调用 LLM 按麦麦的人格与表达风格压缩重写。超限时 `append_note` / `rewrite_note` 会在后台异步触发压缩；也可以主动调用 `compact_notes` 同步等待结果。
+
+> [!TIP]
+> 笔记内容建议用 Markdown 书写（标题、列表等），工具提示里也会这样引导，但插件不强制校验格式。
+
+> [!WARNING]
+> 压缩默认走 `planner` 任务模型，可在配置里改成 `utils` 等。若 `size_limit` 设得很大，又用的是思考模型，请注意 token 消耗。
+
+---
 
 ## 安装
 
-1. 将本插件目录放入 MaiBot 的 `plugins/` 目录下，例如 `plugins/MaiBot-plastic-memory-plugin/`。
-2. 启动 MaiBot，插件会被自动发现并加载。
-3. 也可在 WebUI 的插件管理中查看、启用并编辑配置。
+1. 把本仓库放到 MaiBot 的 `plugins/` 目录，例如 `plugins/MaiBot-plastic-memory-plugin/`
+2. 启动 MaiBot，插件会自动加载
+3. 也可在 WebUI → 插件管理 里启用、改配置
 
-本插件除 `maibot-plugin-sdk` 外没有额外的第三方依赖。
+除 `maibot-plugin-sdk` 外无其他第三方依赖。
 
-## 所需能力（`_manifest.json`）
-
-插件在 `_manifest.json` 中声明以下 Host 能力，用于压缩时读取全局人格配置并调用 LLM：
-
-- **`config.get`** — 读取 `bot.nickname`、`personality.personality`、`personality.reply_style`
-- **`llm.generate`** — 执行便利贴压缩重写
-
-若 `capabilities` 为空，Host 不会为该插件签发能力令牌，后台/同步压缩调用 `ctx.config` 或 `ctx.llm` 时会报 `E_CAPABILITY_DENIED`。
+---
 
 ## 工具说明
 
-### `append_note(content)`
+### 参数 `scope`
 
-把 `content` 追加到便利贴末尾。如果内容结尾没有换行，会自动补一个换行。
-追加后若总字符数超过上限，会在**后台异步**触发一次压缩（工具立即返回）。
+- `**scope="global"`**（默认）— 操作 `my_memory.md`
+- `**scope="stream"`** — 操作当前聊天流的便利贴；stream id 由插件从上下文解析，工具不接受 stream id 参数，无法改动其他聊天流
 
-### `rewrite_note(content)`
+> [!NOTE]
+> 实现层还静默接受 `scope="chat"` 作为 `stream` 的别名，但 LLM 工具描述与注入提示里不会提到这一点。
 
-用 `content` **完全覆盖**整张便利贴，旧内容会被清空。
-如果新内容超过上限，会在**后台异步**触发一次压缩。
+### `append_note(content, scope="global")`
 
-### `compact_notes()`
+在便利贴末尾追加 `content`。若结尾没有换行会自动补上。超过上限时后台异步压缩，工具立即返回。
 
-主动压缩便利贴。与超限自动触发的压缩不同，本工具是**同步阻塞**的：会等压缩完成，并返回压缩后的字符数与剩余可用字符数。若当前未超限则不改动内容。
+### `rewrite_note(content, scope="global")`
 
-## 配置项（`config.toml`）
+用 `content` **完全覆盖**便利贴。超过上限时同样在后台异步压缩。
 
-`[plugin]`
+### `compact_notes(scope="global")`
 
-- `**enabled`** — 是否启用插件。默认 `true`。
-- `**config_version`** — 配置版本。默认 `"1.0.0"`。
+主动压缩。与超限自动压缩不同，本工具**同步阻塞**，会等压缩完成并返回当前字符数与剩余空间；未超限时不会改动内容。
 
-`[memory]`
+---
 
-- `**size_limit**` — 便利贴字符数上限（按**字符**计，不是字节；UTF-8 落盘后的字节数可能更大）。默认 `8192`。
-- `**note_file`** — 便利贴文件名/路径；相对路径基于插件目录解析。默认 `"my_memory.md"`。
-- `**inject_when_empty`** — 便利贴为空时是否仍注入提示。默认 `true`。
-- `**inject_to_planner**` — 是否在 planner / 时机判断请求中注入便利贴。默认 `true`。
-- `**inject_to_replyer**` — 是否在 replyer 回复请求中注入便利贴。默认 `true`。
-- `**max_compact_attempts**` — 单次压缩中结果仍超限时允许递归重压缩的最大次数（防止死循环）。默认 `3`。
-- `**compact_model**` — 执行压缩时使用的 LLM 模型任务名。默认 `"planner"`（即复用 planner 任务的模型）。
-- `**compact_temperature**` — 执行压缩时的采样温度。默认 `0.3`。
-- `**compact_max_tokens**` — 压缩 LLM 调用的最大 token 数。默认 `0`，表示自动按 `size_limit` 的**八倍**计算（为推理模型的 reasoning token 预留空间）；若手动设置的值小于 `size_limit`，会在日志中打印告警。
-- `**hook_timeout_ms**` — 注入 Hook 处理器的超时时间（毫秒）。默认 `60000`（60 秒）。
-- `**injection_template**` — 注入到系统提示词之后的模板。占位符：`{note}`、`{used}`、`{free}`、`{size_limit}`。
-- `**compact_prompt_template**` — 压缩时发给 LLM 的提示词模板。占位符：`{nickname}`、`{personality}`、`{reply_style}`、`{size_limit}`、`{used}`、`{note}`。
+## 配置（`config.toml`）
 
-> **关于 LLM 调用超时**：当前 SDK / 宿主的 LLM 能力（`ctx.llm.generate`）只接受 `model`、`temperature`、`max_tokens`，**没有暴露单次 LLM 调用的超时参数**，因此本插件无法自定义压缩调用的 LLM 超时。`hook_timeout_ms` 控制的是注入 Hook 处理器自身的超时，而非压缩 LLM 调用的超时。
+配置文件位于插件目录。也可在 WebUI 插件管理里编辑。下面按区块说明各字段含义与默认值。
+
+### `[plugin]` — 插件开关
+
+```toml
+[plugin]
+enabled = true
+config_version = "1.1.0"
+```
+
+**`enabled`** — 是否启用插件  
+**`config_version`** — 配置版本号
+
+### `[memory]`
+
+`[memory]` 下所有字段见下方完整示例；下文按用途分段说明。
+
+```toml
+[memory]
+# ── 存储与上限 ──
+size_limit = 8192
+note_file = "my_memory.md"
+per_chat_size_limit = 4096
+per_chat_note_folder = "chat_notes"
+
+# ── 注入 ──
+inject_when_empty = true
+inject_to_planner = true
+inject_to_replyer = true
+hook_timeout_ms = 60000
+# 占位符：{nickname} {note} {used} {free} {size_limit} {stream_section}
+# injection_template = """..."""
+# 占位符：{stream_note} {stream_used} {stream_free} {stream_size_limit}
+# stream_injection_section = """..."""
+
+# ── 压缩 ──
+max_compact_attempts = 3
+compact_model = "planner"
+compact_temperature = 0.3
+compact_max_tokens = 0          # 0 = size_limit × 8
+# 占位符：{nickname} {personality} {reply_style} {note_scope} {size_limit} {used} {note}
+# compact_prompt_template = """..."""
+```
+
+#### 存储与上限
+
+`**size_limit**` — 全局便利贴字符上限（按字符计，非字节）。默认 `8192`  
+`**note_file**` — 全局便利贴路径；相对路径基于插件目录。默认 `my_memory.md`  
+`**per_chat_size_limit**` — 本聊天流便利贴字符上限。默认 `4096`  
+`**per_chat_note_folder**` — 本聊天流目录；每流一个 `<stream_id>.md`。默认 `chat_notes`
+
+#### 注入
+
+`**inject_when_empty**` — 空笔记时是否仍注入提示。默认 `true`  
+`**inject_to_planner**` / `**inject_to_replyer**` — 是否在 planner / 时机判断 / replyer 中注入。默认均为 `true`  
+`**hook_timeout_ms**` — 注入 Hook 处理器超时（毫秒）。默认 `60000`（**不是**压缩 LLM 的超时）  
+`**injection_template`** — 注入模板。默认把含 `{nickname}` 的说明放在【全局便利贴】之前，便于模型缓存；可自行调整各段顺序  
+`**stream_injection_section`** — 本聊天流便利贴子模板，渲染后填入 `{stream_section}`
+
+模板字符串较长，完整默认值见仓库内 `config.toml`。
+
+> [!NOTE]
+> 当前 `ctx.llm.generate` 未暴露单次 LLM 超时参数，插件无法单独配置压缩调用的超时。
+
+#### 压缩
+
+`**max_compact_attempts**` — 单次压缩仍超限时，最多递归重试次数。默认 `3`  
+`**compact_model**` — 压缩使用的 LLM 任务名。默认 `planner`  
+`**compact_temperature**` — 压缩采样温度。默认 `0.3`  
+`**compact_max_tokens**` — 压缩 `max_tokens`；`0` 表示按对应 `size_limit × 8` 自动计算。默认 `0`  
+`**compact_prompt_template**` — 压缩时发给 LLM 的提示词模板
+
+---
 
 ## 工作原理
 
-- 注入通过两个命名 Hook 完成：
-  - `maisaka.planner.before_request`（同时覆盖 planner 主流程与"时机判断"子代理）；
-  - `maisaka.replyer.before_model_request`（覆盖 replyer）。
-  插件在这两个 Hook 中读取便利贴，并把它作为一条 `user` 消息插入到最后一条 `system` 消息之后。
-- 压缩时，插件从宿主全局配置读取 `bot.nickname`、`personality.personality`、`personality.reply_style`，让 LLM 以麦麦的身份与风格重写笔记。
+注入靠两个 Hook：
 
-### 压缩时的 max_tokens 与长度重试
+- `maisaka.planner.before_request` — planner 主流程与时机判断
+- `maisaka.replyer.before_model_request` — replyer
 
-- **`compact_max_tokens = 0`（默认）**：自动使用 `size_limit × 8` 作为本次压缩 LLM 调用的初始 `max_tokens` 上限（推理模型可能在 `reasoning` 阶段消耗大量 token）。
-- **`compact_max_tokens > 0`**：使用你配置的固定值；若小于 `size_limit`，会在日志中告警。
-- **长度触顶重试**：每次压缩 LLM 调用后，插件会尝试判断是否因输出被截断而需要重试：
-  - 若 Host 返回了 `finish_reason`（当前 MaiBot 能力层通常**尚未暴露**该字段），则优先依据 `finish_reason`（如 `length`、`max_tokens`）判断；
-  - 否则使用启发式：若返回笔记字符数 **小于 `size_limit` 的 80%**，视为可能被截断。
-- 若判定需要重试，插件会**临时将本次调用的 `max_tokens` 翻倍**并用相同 prompt **重试**，最多 **3** 次（加上首次调用，最多共 **4** 次）。若多次调用都未得到理想结果，最终**选用字符数最长的那次响应**写入便利贴。该放大仅作用于当前这一次压缩调用，不会写回 `config.toml`。
+插件读取全局与本聊天流便利贴，合成一条 `user` 消息，插在最后一条 `system` 消息之后。聊天流 id 从 Hook 上下文里的 `session_id` 解析。
+
+压缩时会读取 `bot.nickname`、`personality.personality`、`personality.reply_style`，让 LLM 以麦麦的身份重写笔记。
+
+### 压缩时的 `max_tokens` 与重试
+
+```toml
+compact_max_tokens = 0   # 默认：初始 max_tokens = size_limit × 8
+```
+
+- `**compact_max_tokens = 0**` — 为推理模型的 reasoning token 留余量，自动按 `size_limit × 8` 计算
+- `**compact_max_tokens > 0**` — 使用固定值；若小于 `size_limit`，日志会告警
+
+**长度触顶重试** — 每次压缩后判断是否可能被截断：
+
+- 优先看 Host 返回的 `finish_reason`
+- 若无该字段：返回字符数 **< `size_limit` 的 80%** 时视为可能被截断
+
+需要重试时，临时将 `max_tokens` 翻倍，最多重试 **3** 次（加首次共 **4** 次调用），最终取**最长**的那次响应写入。
+
+---
 
 ## 常见问题
 
-**便利贴文件存在哪里？**
-默认在插件目录下的 `my_memory.md`（可通过 `note_file` 修改）。该文件已加入 `.gitignore`，不会进入版本库。
+> **便利贴存在哪？**
 
-**为什么 8192 字符的笔记，文件大小却更大？**
-`size_limit` 按字符计；中文在 UTF-8 下每个字符约占 3 字节，因此文件字节数可能明显大于字符数，这是正常现象。
+- 全局：`my_memory.md`（可用 `note_file` 改路径）
+- 本聊天流：`chat_notes/` 下，每个聊天流一个文件
 
-**压缩会一直循环吗？**
-不会。压缩存在 `max_compact_attempts` 上限；即使多次压缩仍超限，也会写入"目前最短"的结果后停止。
+以上文件已在 `.gitignore` 中，不会进版本库。
 
-**插件能读取 LLM 的 finish_reason 吗？**
-当前 MaiBot 的 `ctx.llm.generate` 能力返回值通常**不包含** `finish_reason`。插件已实现对该字段的优先检测（以便 Host 将来暴露时自动生效），并在缺失时回退到「返回笔记少于 `size_limit` 的 80% 则视为可能被截断」的启发式；若判定需要重试，会临时翻倍 `max_tokens` 并重试（最多 3 次，共最多 4 次调用），最终选用最长响应。
+> **全局和本聊天流便利贴有什么区别？**
+
+全局的在所有聊天里都会注入；本聊天流的只在对应聊天流里出现，适合记「这个群/这个私聊」相关的备忘。
+
+> **为什么 8192 字符的文件更大？**
+
+`size_limit` 按**字符**计。中文 UTF-8 编码下每字约 3 字节，文件字节数大于字符数是正常现象。
+
+> **压缩会死循环吗？**
+
+不会。有 `max_compact_attempts` 上限；多次仍超限也会写入目前最短的结果后停止。
+
+---
 
 ## 许可证
 
