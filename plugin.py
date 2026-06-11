@@ -128,6 +128,34 @@ def _normalize_scope(scope: str) -> tuple[Optional[Literal["global", "stream"]],
     return None, f'无效的 scope 值 "{scope}"，请使用 "global" 或 "stream"。'
 
 
+def _apply_append_to_note(
+    current: str,
+    content: str,
+    insert_after_string: str = "",
+) -> tuple[str, Optional[str], bool]:
+    """将 content 写入笔记。
+
+    Returns:
+        (new_content, error_message, inserted_after_anchor)
+        ``inserted_after_anchor`` 为 True 表示按锚点插入，False 表示追加到末尾。
+    """
+    anchor = insert_after_string
+    if anchor:
+        index = current.find(anchor)
+        if index == -1:
+            return current, "未在便利贴中找到指定的 insert_after_string，未写入。", False
+        insert_at = index + len(anchor)
+        new_content = current[:insert_at] + content + current[insert_at:]
+        inserted_after_anchor = True
+    else:
+        new_content = current + content
+        inserted_after_anchor = False
+
+    if new_content and not new_content.endswith("\n"):
+        new_content += "\n"
+    return new_content, None, inserted_after_anchor
+
+
 def _resolve_compact_max_tokens(configured: int, size_limit: int) -> int:
     """解析压缩调用的 max_tokens。
 
@@ -581,8 +609,10 @@ class PlasticMemoryPlugin(MaiBotPlugin):
     @Tool(
         "append_note",
         description=(
-            "把一段内容追加到你的便利贴笔记末尾，用于给自己留备忘。"
+            "把一段内容追加到你的便利贴笔记，用于给自己留备忘。"
             "默认 scope=\"global\" 写入全局便利贴；scope=\"stream\" 仅写入当前聊天流便利贴（其他聊天流看不到）。"
+            "未指定 insert_after_string 时追加到便利贴末尾；"
+            "指定时插入到该字符串【第一次出现】的位置之后（找不到则不写入）。"
             "建议使用 Markdown 书写（如标题、列表），但不强制。"
             "如果你的内容结尾没有换行，会自动补一个换行。"
             "注意：追加后若笔记总字符数超过上限，会在后台异步触发一次 LLM 压缩重写（compact_notes），"
@@ -592,22 +622,42 @@ class PlasticMemoryPlugin(MaiBotPlugin):
             ToolParameterInfo(
                 name="content",
                 param_type=ToolParamType.STRING,
-                description="要追加到便利贴末尾的文本内容。",
+                description="要写入便利贴的文本内容。",
                 required=True,
             ),
             SCOPE_TOOL_PARAM,
+            ToolParameterInfo(
+                name="insert_after_string",
+                param_type=ToolParamType.STRING,
+                description=(
+                    "可选。若提供，则将 content 插入到此字符串第一次出现的位置之后；"
+                    "省略则追加到便利贴末尾。"
+                ),
+                required=False,
+            ),
         ],
     )
-    async def append_note(self, content: str, scope: str = "global", **kwargs: Any) -> dict[str, str]:
+    async def append_note(
+        self,
+        content: str,
+        scope: str = "global",
+        insert_after_string: str = "",
+        **kwargs: Any,
+    ) -> dict[str, str]:
         store, size_limit, scope_label, error = self._resolve_target(scope, kwargs)
         if error:
             return {"content": error}
 
         async with store.lock:
             current = store.read()
-            new_content = current + content
-            if not new_content.endswith("\n"):
-                new_content += "\n"
+            new_content, append_error, inserted_after_anchor = _apply_append_to_note(
+                current,
+                content,
+                insert_after_string,
+            )
+            if append_error:
+                return {"content": append_error}
+
             store.write(new_content)
             used = len(new_content)
 
@@ -615,9 +665,11 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         if over:
             self._schedule_compact(store, size_limit, scope_label)
         free = max(0, size_limit - used)
-        message = (
-            f"已追加到{scope_label}便利贴。当前 {used} 字符，剩余可用 {free} 字符（上限 {size_limit}）。"
-        )
+        if inserted_after_anchor:
+            action = f"已在{scope_label}便利贴中指定字符串之后插入内容"
+        else:
+            action = f"已追加到{scope_label}便利贴末尾"
+        message = f"{action}。当前 {used} 字符，剩余可用 {free} 字符（上限 {size_limit}）。"
         if over:
             message += " 笔记已超过上限，已在后台触发自动压缩。"
         return {"content": message}
