@@ -4,7 +4,7 @@
 # 是否启用插件
 enabled = true
 # 配置版本
-config_version = "1.1.0"
+config_version = "1.2.0"
 
 [memory]
 # 全局便利贴笔记的字符数上限（按字符计，不是字节）。超过后会触发 LLM 压缩。
@@ -35,11 +35,19 @@ compact_max_tokens = 0
 # 注入 Hook 处理器的超时时间（毫秒），默认 60000（60 秒）。
 hook_timeout_ms = 60000
 
-# 注入到系统提示词之后的模板。
+# planner / 时机判断注入模板。
 # 占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}
 # 说明性文字默认置于【全局便利贴】之前便于模型缓存，可自行调整各段顺序。
 # {stream_section} 由插件根据当前聊天流自动填充（无聊天流上下文时为空）。
 injection_template = """以下便利贴是你（{nickname}）自己写给自己的备忘，每次请求都会注入在系统提示词之后，相当于一份你可随时自行修改的二级指令——写在这里的内容会持续影响你之后的思考与回复，请把它当作给自己的长期指令来对待与维护。可用 append_note、rewrite_note、compact_notes 维护（参数 scope 默认 global 记全局，stream 记本聊天流）。
+
+【全局便利贴】
+{note}
+（{used}/{size_limit}）{stream_section}"""
+
+# replyer 注入模板（replyer 无工具调用能力，默认不提及维护方法）。
+# 占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}
+replyer_injection_template = """以下是你（{nickname}）先前写给自己的备忘，请在思考与回复时参考。
 
 【全局便利贴】
 {note}

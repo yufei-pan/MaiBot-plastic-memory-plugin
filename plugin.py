@@ -17,9 +17,17 @@ from maibot_sdk import Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder, ToolParameterInfo, ToolParamType
 
 
-# 默认注入模板，可在 config.toml 中覆盖。说明性文字默认置于【全局便利贴】之前便于模型缓存。
+# planner 默认注入模板，可在 config.toml 的 injection_template 中覆盖。
 # 占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}
 DEFAULT_INJECTION_TEMPLATE = """以下便利贴是你（{nickname}）自己写给自己的备忘，每次请求都会注入在系统提示词之后，相当于一份你可随时自行修改的二级指令——写在这里的内容会持续影响你之后的思考与回复，请把它当作给自己的长期指令来对待与维护。可用 append_note、rewrite_note、compact_notes 维护（参数 scope 默认 global 记全局，stream 记本聊天流）。
+
+【全局便利贴】
+{note}
+（{used}/{size_limit}）{stream_section}"""
+
+# replyer 默认注入模板，可在 config.toml 的 replyer_injection_template 中覆盖。
+# replyer 无工具调用能力，故不提及维护方法。
+DEFAULT_REPLYER_INJECTION_TEMPLATE = """以下是你（{nickname}）先前写给自己的备忘，请在思考与回复时参考。
 
 【全局便利贴】
 {note}
@@ -288,8 +296,16 @@ class MemorySectionConfig(PluginConfigBase):
     injection_template: str = Field(
         default=DEFAULT_INJECTION_TEMPLATE,
         description=(
-            "注入到系统提示词之后的模板；说明性文字默认置于【全局便利贴】之前便于模型缓存，"
+            "planner / 时机判断注入模板；说明性文字默认置于【全局便利贴】之前便于模型缓存，"
             "可自行调整各段顺序。"
+            "占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}。"
+        ),
+    )
+    replyer_injection_template: str = Field(
+        default=DEFAULT_REPLYER_INJECTION_TEMPLATE,
+        description=(
+            "replyer 注入模板；replyer 无工具调用能力，默认仅提示参考先前备忘，"
+            "不提及维护方法或二级指令定位。"
             "占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}。"
         ),
     )
@@ -317,7 +333,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.1.0", description="配置版本")
+    config_version: str = Field(default="1.2.0", description="配置版本")
 
 
 class PlasticMemoryConfig(PluginConfigBase):
@@ -351,6 +367,7 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         self._compact_max_tokens: int = 0
         self._hook_timeout_ms: int = DEFAULT_HOOK_TIMEOUT_MS
         self._injection_template: str = DEFAULT_INJECTION_TEMPLATE
+        self._replyer_injection_template: str = DEFAULT_REPLYER_INJECTION_TEMPLATE
         self._stream_injection_section: str = DEFAULT_STREAM_INJECTION_SECTION
         self._compact_prompt_template: str = DEFAULT_COMPACT_PROMPT_TEMPLATE
 
@@ -433,6 +450,9 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         self._compact_max_tokens = max(0, int(memory.compact_max_tokens))
         self._hook_timeout_ms = max(1, int(memory.hook_timeout_ms))
         self._injection_template = memory.injection_template or DEFAULT_INJECTION_TEMPLATE
+        self._replyer_injection_template = (
+            memory.replyer_injection_template or DEFAULT_REPLYER_INJECTION_TEMPLATE
+        )
         self._stream_injection_section = (
             memory.stream_injection_section or DEFAULT_STREAM_INJECTION_SECTION
         )
@@ -529,7 +549,7 @@ class PlasticMemoryPlugin(MaiBotPlugin):
     async def inject_planner(self, **kwargs: Any) -> dict[str, Any]:
         if not self._inject_to_planner:
             return {"action": "continue"}
-        return await self._inject(kwargs)
+        return await self._inject(kwargs, self._injection_template)
 
     @HookHandler(
         "maisaka.replyer.before_model_request",
@@ -543,9 +563,9 @@ class PlasticMemoryPlugin(MaiBotPlugin):
     async def inject_replyer(self, **kwargs: Any) -> dict[str, Any]:
         if not self._inject_to_replyer:
             return {"action": "continue"}
-        return await self._inject(kwargs)
+        return await self._inject(kwargs, self._replyer_injection_template)
 
-    async def _inject(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+    async def _inject(self, kwargs: dict[str, Any], injection_template: str) -> dict[str, Any]:
         """把便利贴笔记作为一条 user 消息插入到 system 之后。"""
         try:
             messages = kwargs.get("messages")
@@ -581,7 +601,7 @@ class PlasticMemoryPlugin(MaiBotPlugin):
                 note_display = ""
 
             block = _render(
-                self._injection_template,
+                injection_template,
                 nickname=nickname,
                 note=note_display,
                 used=used,
