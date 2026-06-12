@@ -19,7 +19,7 @@ from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder, ToolParameterInfo
 
 # 默认注入模板，可在 config.toml 中覆盖。说明性文字默认置于【全局便利贴】之前便于模型缓存。
 # 占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}
-DEFAULT_INJECTION_TEMPLATE = """以下便利贴是你（{nickname}）自己写给自己的备忘。可用 append_note、rewrite_note、compact_notes 维护（参数 scope 默认 global 记全局，stream 记本聊天流）。
+DEFAULT_INJECTION_TEMPLATE = """以下便利贴是你（{nickname}）自己写给自己的备忘，每次请求都会注入在系统提示词之后，相当于一份你可随时自行修改的二级指令——写在这里的内容会持续影响你之后的思考与回复，请把它当作给自己的长期指令来对待与维护。可用 append_note、rewrite_note、compact_notes 维护（参数 scope 默认 global 记全局，stream 记本聊天流）。
 
 【全局便利贴】
 {note}
@@ -609,7 +609,8 @@ class PlasticMemoryPlugin(MaiBotPlugin):
     @Tool(
         "append_note",
         description=(
-            "把一段内容追加到你的便利贴笔记，用于给自己留备忘。"
+            "向你的便利贴笔记追加内容。便利贴每次请求都会注入在系统提示词之后，"
+            "相当于一份你可自行修改的二级指令，写入的内容会持续影响你之后的思考与回复，请据此谨慎维护。"
             "默认 scope=\"global\" 写入全局便利贴；scope=\"stream\" 仅写入当前聊天流便利贴（其他聊天流看不到）。"
             "未指定 insert_after_string 时追加到便利贴末尾；"
             "指定时插入到该字符串【第一次出现】的位置之后（找不到则不写入）。"
@@ -677,7 +678,8 @@ class PlasticMemoryPlugin(MaiBotPlugin):
     @Tool(
         "rewrite_note",
         description=(
-            "用你提供的新内容【完全覆盖】便利贴笔记——旧内容会被清空。"
+            "用你提供的新内容【完全覆盖】便利贴笔记——旧内容会被清空。便利贴每次请求都会注入在系统提示词之后，"
+            "相当于一份你可自行修改的二级指令，覆盖后会持续影响你之后的思考与回复，请确认要保留的内容已写入。"
             "默认 scope=\"global\" 覆盖全局便利贴；scope=\"stream\" 仅覆盖当前聊天流便利贴。"
             "建议使用 Markdown 书写，但不强制。"
             "注意：如果新内容的字符数超过上限，会在后台异步触发一次 LLM 压缩重写（compact_notes），"
