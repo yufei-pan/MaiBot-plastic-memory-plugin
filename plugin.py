@@ -10,6 +10,8 @@
 import asyncio
 import hashlib
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Optional, Set
 
@@ -87,6 +89,17 @@ DEFAULT_COMPACT_PROMPT_TEMPLATE = """你是{nickname}。
 
 当前笔记内容：
 {note}"""
+
+CURRENT_CONFIG_VERSION = "1.3.0"
+
+DEFAULT_SIZE_LIMIT = 8192
+DEFAULT_NOTE_FILE = "my_memory.md"
+DEFAULT_PER_CHAT_SIZE_LIMIT = 4096
+DEFAULT_PER_CHAT_NOTE_FOLDER = "chat_notes"
+DEFAULT_MAX_COMPACT_ATTEMPTS = 3
+DEFAULT_COMPACT_MODEL = "planner"
+DEFAULT_COMPACT_TEMPERATURE = 0.3
+DEFAULT_COMPACT_MAX_TOKENS = 0
 
 
 def _render(template: str, **values: Any) -> str:
@@ -241,87 +254,103 @@ class MemorySectionConfig(PluginConfigBase):
     __ui_icon__ = "sticky-note"
     __ui_order__ = 1
 
-    size_limit: int = Field(
-        default=8192,
+    size_limit: int | None = Field(
+        default=None,
+        json_schema_extra={"placeholder": str(DEFAULT_SIZE_LIMIT)},
         description="全局便利贴笔记的字符数上限（按字符计，不是字节）。超过后会触发 LLM 压缩。",
     )
-    note_file: str = Field(
-        default="my_memory.md",
+    note_file: str | None = Field(
+        default=None,
+        json_schema_extra={"placeholder": DEFAULT_NOTE_FILE},
         description="全局便利贴笔记文件名/路径；相对路径会基于插件目录解析。",
     )
-    per_chat_size_limit: int = Field(
-        default=4096,
+    per_chat_size_limit: int | None = Field(
+        default=None,
+        json_schema_extra={"placeholder": str(DEFAULT_PER_CHAT_SIZE_LIMIT)},
         description="本聊天流便利贴笔记的字符数上限（按字符计，不是字节）。超过后会触发 LLM 压缩。",
     )
-    per_chat_note_folder: str = Field(
-        default="chat_notes",
+    per_chat_note_folder: str | None = Field(
+        default=None,
+        json_schema_extra={"placeholder": DEFAULT_PER_CHAT_NOTE_FOLDER},
         description="本聊天流便利贴存放目录；相对路径会基于插件目录解析，每个聊天流对应 <stream_id>.md。",
     )
-    inject_when_empty: bool = Field(
-        default=True,
+    inject_when_empty: bool | None = Field(
+        default=None,
+        json_schema_extra={"placeholder": "true"},
         description="笔记为空时是否仍然注入提示（让麦麦知道可以给自己留备忘）。",
     )
-    inject_to_planner: bool = Field(
-        default=True,
+    inject_to_planner: bool | None = Field(
+        default=None,
+        json_schema_extra={"placeholder": "true"},
         description="是否在 planner / 时机判断请求中注入便利贴。",
     )
-    inject_to_replyer: bool = Field(
-        default=True,
+    inject_to_replyer: bool | None = Field(
+        default=None,
+        json_schema_extra={"placeholder": "true"},
         description="是否在 replyer 回复请求中注入便利贴。",
     )
-    max_compact_attempts: int = Field(
-        default=3,
+    max_compact_attempts: int | None = Field(
+        default=None,
+        json_schema_extra={"placeholder": str(DEFAULT_MAX_COMPACT_ATTEMPTS)},
         description="单次压缩中，当结果仍超过上限时允许递归重压缩的最大次数（防止死循环）。",
     )
-    compact_model: str = Field(
-        default="planner",
+    compact_model: str | None = Field(
+        default=None,
+        json_schema_extra={"placeholder": DEFAULT_COMPACT_MODEL},
         description="执行压缩时使用的 LLM 模型任务名；默认使用 planner 任务的模型。",
     )
-    compact_temperature: float = Field(
-        default=0.3,
+    compact_temperature: float | None = Field(
+        default=None,
+        json_schema_extra={"placeholder": str(DEFAULT_COMPACT_TEMPERATURE)},
         description="执行压缩时的采样温度。",
     )
-    compact_max_tokens: int = Field(
-        default=0,
+    compact_max_tokens: int | None = Field(
+        default=None,
+        json_schema_extra={"placeholder": str(DEFAULT_COMPACT_MAX_TOKENS)},
         description=(
             "压缩 LLM 调用的最大 token 数；0 表示自动按 size_limit 的八倍计算"
             "（为推理模型的 reasoning token 预留空间）。"
             "若小于 size_limit 会在日志中告警。"
         ),
     )
-    hook_timeout_ms: int = Field(
-        default=DEFAULT_HOOK_TIMEOUT_MS,
+    hook_timeout_ms: int | None = Field(
+        default=None,
+        json_schema_extra={"placeholder": str(DEFAULT_HOOK_TIMEOUT_MS)},
         description="注入 Hook 处理器的超时时间（毫秒），默认 60000（60 秒）。",
     )
     injection_template: str = Field(
-        default=DEFAULT_INJECTION_TEMPLATE,
+        default="",
         description=(
             "planner / 时机判断注入模板；说明性文字默认置于【全局便利贴】之前便于模型缓存，"
             "可自行调整各段顺序。"
             "占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}。"
         ),
+        json_schema_extra={"placeholder": DEFAULT_INJECTION_TEMPLATE},
     )
     replyer_injection_template: str = Field(
-        default=DEFAULT_REPLYER_INJECTION_TEMPLATE,
+        default="",
         description=(
             "replyer 注入模板；replyer 无工具调用能力，默认仅提示参考先前备忘，"
             "不提及维护方法或二级指令定位。"
             "占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}。"
         ),
+        json_schema_extra={"placeholder": DEFAULT_REPLYER_INJECTION_TEMPLATE},
     )
     stream_injection_section: str = Field(
-        default=DEFAULT_STREAM_INJECTION_SECTION,
+        default="",
         description=(
             "本聊天流便利贴注入子模板；渲染后填入 injection_template 的 {stream_section}。"
             "占位符：{stream_note}、{stream_used}、{stream_free}、{stream_size_limit}。"
         ),
+        json_schema_extra={"placeholder": DEFAULT_STREAM_INJECTION_SECTION},
     )
     compact_prompt_template: str = Field(
-        default=DEFAULT_COMPACT_PROMPT_TEMPLATE,
+        default="",
         description=(
             "压缩笔记时发给 LLM 的提示词模板。"
             "占位符：{nickname}、{personality}、{reply_style}、{note_scope}、{size_limit}、{used}、{note}。"
         ),
+        json_schema_extra={"placeholder": DEFAULT_COMPACT_PROMPT_TEMPLATE},
     )
 
 
@@ -333,7 +362,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="1.2.0", description="配置版本")
+    config_version: str = Field(default=CURRENT_CONFIG_VERSION, description="配置版本")
 
 
 class PlasticMemoryConfig(PluginConfigBase):
@@ -341,6 +370,145 @@ class PlasticMemoryConfig(PluginConfigBase):
 
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
     memory: MemorySectionConfig = Field(default_factory=MemorySectionConfig)
+
+
+class PlasticMemoryConfig(PluginConfigBase):
+    """插件完整配置。"""
+
+    plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
+    memory: MemorySectionConfig = Field(default_factory=MemorySectionConfig)
+
+
+# --------------------------------------------------------------------------- #
+# 配置解析（空值 = 使用代码内置默认，便于版本升级后自动跟随新默认）
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class EffectiveMemoryConfig:
+    """运行时生效的便利贴配置（已解析占位空值）。"""
+
+    size_limit: int
+    note_file: str
+    per_chat_size_limit: int
+    per_chat_note_folder: str
+    inject_when_empty: bool
+    inject_to_planner: bool
+    inject_to_replyer: bool
+    max_compact_attempts: int
+    compact_model: str
+    compact_temperature: float
+    compact_max_tokens: int
+    hook_timeout_ms: int
+    injection_template: str
+    replyer_injection_template: str
+    stream_injection_section: str
+    compact_prompt_template: str
+
+
+def _effective_bool(value: bool | None, default: bool) -> bool:
+    if value is None:
+        return default
+    return bool(value)
+
+
+def _effective_int(value: int | None, default: int, *, minimum: int = 0) -> int:
+    if value is None:
+        return default
+    return max(minimum, int(value))
+
+
+def _effective_float(value: float | None, default: float) -> float:
+    if value is None:
+        return default
+    return float(value)
+
+
+def _effective_str(value: str | None, default: str) -> str:
+    if value is None or not str(value).strip():
+        return default
+    return str(value).strip()
+
+
+def _effective_template(value: str | None, default: str) -> str:
+    if value is None or not str(value).strip():
+        return default
+    return str(value)
+
+
+def resolve_effective_memory_config(memory: MemorySectionConfig) -> EffectiveMemoryConfig:
+    return EffectiveMemoryConfig(
+        size_limit=_effective_int(memory.size_limit, DEFAULT_SIZE_LIMIT, minimum=1),
+        note_file=_effective_str(memory.note_file, DEFAULT_NOTE_FILE),
+        per_chat_size_limit=_effective_int(memory.per_chat_size_limit, DEFAULT_PER_CHAT_SIZE_LIMIT, minimum=1),
+        per_chat_note_folder=_effective_str(memory.per_chat_note_folder, DEFAULT_PER_CHAT_NOTE_FOLDER),
+        inject_when_empty=_effective_bool(memory.inject_when_empty, True),
+        inject_to_planner=_effective_bool(memory.inject_to_planner, True),
+        inject_to_replyer=_effective_bool(memory.inject_to_replyer, True),
+        max_compact_attempts=_effective_int(memory.max_compact_attempts, DEFAULT_MAX_COMPACT_ATTEMPTS, minimum=1),
+        compact_model=_effective_str(memory.compact_model, DEFAULT_COMPACT_MODEL),
+        compact_temperature=_effective_float(memory.compact_temperature, DEFAULT_COMPACT_TEMPERATURE),
+        compact_max_tokens=max(0, _effective_int(memory.compact_max_tokens, DEFAULT_COMPACT_MAX_TOKENS)),
+        hook_timeout_ms=_effective_int(memory.hook_timeout_ms, DEFAULT_HOOK_TIMEOUT_MS, minimum=1),
+        injection_template=_effective_template(memory.injection_template, DEFAULT_INJECTION_TEMPLATE),
+        replyer_injection_template=_effective_template(
+            memory.replyer_injection_template, DEFAULT_REPLYER_INJECTION_TEMPLATE
+        ),
+        stream_injection_section=_effective_template(
+            memory.stream_injection_section, DEFAULT_STREAM_INJECTION_SECTION
+        ),
+        compact_prompt_template=_effective_template(
+            memory.compact_prompt_template, DEFAULT_COMPACT_PROMPT_TEMPLATE
+        ),
+    )
+
+
+_LEGACY_BAKED_MEMORY_DEFAULTS: dict[str, int | float | str | bool] = {
+    "size_limit": DEFAULT_SIZE_LIMIT,
+    "note_file": DEFAULT_NOTE_FILE,
+    "per_chat_size_limit": DEFAULT_PER_CHAT_SIZE_LIMIT,
+    "per_chat_note_folder": DEFAULT_PER_CHAT_NOTE_FOLDER,
+    "inject_when_empty": True,
+    "inject_to_planner": True,
+    "inject_to_replyer": True,
+    "max_compact_attempts": DEFAULT_MAX_COMPACT_ATTEMPTS,
+    "compact_model": DEFAULT_COMPACT_MODEL,
+    "compact_temperature": DEFAULT_COMPACT_TEMPERATURE,
+    "compact_max_tokens": DEFAULT_COMPACT_MAX_TOKENS,
+    "hook_timeout_ms": DEFAULT_HOOK_TIMEOUT_MS,
+    "injection_template": DEFAULT_INJECTION_TEMPLATE,
+    "replyer_injection_template": DEFAULT_REPLYER_INJECTION_TEMPLATE,
+    "stream_injection_section": DEFAULT_STREAM_INJECTION_SECTION,
+    "compact_prompt_template": DEFAULT_COMPACT_PROMPT_TEMPLATE,
+}
+
+
+def _migrate_legacy_baked_defaults(config: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """将旧版 config.toml 中写死的默认值还原为占位空值，以便跟随代码内置默认。"""
+    memory = config.get("memory")
+    if not isinstance(memory, dict):
+        return config, False
+
+    changed = False
+    for key, legacy_value in _LEGACY_BAKED_MEMORY_DEFAULTS.items():
+        if key not in memory:
+            continue
+        current = memory[key]
+        if isinstance(legacy_value, str):
+            if str(current) != legacy_value:
+                continue
+            memory[key] = ""
+        elif current == legacy_value:
+            memory[key] = None
+        else:
+            continue
+        changed = True
+
+    plugin_section = config.get("plugin")
+    if isinstance(plugin_section, dict):
+        plugin_section["config_version"] = CURRENT_CONFIG_VERSION
+
+    return config, changed
 
 
 class PlasticMemoryPlugin(MaiBotPlugin):
@@ -370,6 +538,8 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         self._replyer_injection_template: str = DEFAULT_REPLYER_INJECTION_TEMPLATE
         self._stream_injection_section: str = DEFAULT_STREAM_INJECTION_SECTION
         self._compact_prompt_template: str = DEFAULT_COMPACT_PROMPT_TEMPLATE
+        self._note_file: str = DEFAULT_NOTE_FILE
+        self._chat_note_folder_name: str = DEFAULT_PER_CHAT_NOTE_FOLDER
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -413,6 +583,13 @@ class PlasticMemoryPlugin(MaiBotPlugin):
             chat_folder.mkdir(parents=True, exist_ok=True)
             self.ctx.logger.info("便利贴记忆插件配置已更新: version=%s", version)
 
+    def normalize_plugin_config(
+        self, config_data: Mapping[str, Any] | None
+    ) -> tuple[dict[str, Any], bool]:
+        normalized, changed = super().normalize_plugin_config(config_data)
+        migrated, migrated_changed = _migrate_legacy_baked_defaults(normalized)
+        return migrated, changed or migrated_changed
+
     def get_components(self) -> list[dict[str, Any]]:
         """收集组件，并按配置覆盖注入 Hook 的超时时间。
 
@@ -422,7 +599,7 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         """
         components = super().get_components()
         try:
-            timeout_ms = max(1, int(self.config.memory.hook_timeout_ms))
+            timeout_ms = resolve_effective_memory_config(self.config.memory).hook_timeout_ms
         except Exception:
             timeout_ms = DEFAULT_HOOK_TIMEOUT_MS
         for component in components:
@@ -437,26 +614,24 @@ class PlasticMemoryPlugin(MaiBotPlugin):
     # ------------------------------------------------------------------ #
     def _refresh_config(self) -> None:
         """从强类型配置刷新派生缓存。"""
-        memory = self.config.memory
-        self._size_limit = max(1, int(memory.size_limit))
-        self._per_chat_size_limit = max(1, int(memory.per_chat_size_limit))
+        effective = resolve_effective_memory_config(self.config.memory)
+        self._size_limit = effective.size_limit
+        self._per_chat_size_limit = effective.per_chat_size_limit
         self._per_chat_note_folder = self._resolve_chat_note_folder()
-        self._inject_when_empty = bool(memory.inject_when_empty)
-        self._inject_to_planner = bool(memory.inject_to_planner)
-        self._inject_to_replyer = bool(memory.inject_to_replyer)
-        self._max_compact_attempts = max(1, int(memory.max_compact_attempts))
-        self._compact_model = (memory.compact_model or "planner").strip() or "planner"
-        self._compact_temperature = float(memory.compact_temperature)
-        self._compact_max_tokens = max(0, int(memory.compact_max_tokens))
-        self._hook_timeout_ms = max(1, int(memory.hook_timeout_ms))
-        self._injection_template = memory.injection_template or DEFAULT_INJECTION_TEMPLATE
-        self._replyer_injection_template = (
-            memory.replyer_injection_template or DEFAULT_REPLYER_INJECTION_TEMPLATE
-        )
-        self._stream_injection_section = (
-            memory.stream_injection_section or DEFAULT_STREAM_INJECTION_SECTION
-        )
-        self._compact_prompt_template = memory.compact_prompt_template or DEFAULT_COMPACT_PROMPT_TEMPLATE
+        self._inject_when_empty = effective.inject_when_empty
+        self._inject_to_planner = effective.inject_to_planner
+        self._inject_to_replyer = effective.inject_to_replyer
+        self._max_compact_attempts = effective.max_compact_attempts
+        self._compact_model = effective.compact_model
+        self._compact_temperature = effective.compact_temperature
+        self._compact_max_tokens = effective.compact_max_tokens
+        self._hook_timeout_ms = effective.hook_timeout_ms
+        self._injection_template = effective.injection_template
+        self._replyer_injection_template = effective.replyer_injection_template
+        self._stream_injection_section = effective.stream_injection_section
+        self._compact_prompt_template = effective.compact_prompt_template
+        self._note_file = effective.note_file
+        self._chat_note_folder_name = effective.per_chat_note_folder
 
     def _resolve_path_under_plugin(self, raw: str, default: str) -> Path:
         """解析相对/绝对路径，相对路径基于插件目录。"""
@@ -467,11 +642,11 @@ class PlasticMemoryPlugin(MaiBotPlugin):
 
     def _resolve_note_path(self) -> Path:
         """解析全局笔记文件路径。"""
-        return self._resolve_path_under_plugin(self.config.memory.note_file, "my_memory.md")
+        return self._resolve_path_under_plugin(self._note_file, DEFAULT_NOTE_FILE)
 
     def _resolve_chat_note_folder(self) -> Path:
         """解析本聊天流便利贴目录路径。"""
-        return self._resolve_path_under_plugin(self.config.memory.per_chat_note_folder, "chat_notes")
+        return self._resolve_path_under_plugin(self._chat_note_folder_name, DEFAULT_PER_CHAT_NOTE_FOLDER)
 
     def _resolve_chat_note_path(self, stream_id: str) -> Path:
         """解析单个聊天流的便利贴文件路径。"""
