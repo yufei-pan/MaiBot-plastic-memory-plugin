@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional, Set
 
 from maibot_sdk import Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
+from maibot_sdk.config import validate_plugin_config
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder, ToolParameterInfo, ToolParamType
 
 
@@ -499,7 +500,7 @@ def _migrate_legacy_baked_defaults(config: dict[str, Any]) -> tuple[dict[str, An
                 continue
             memory[key] = ""
         elif current == legacy_value:
-            memory[key] = None
+            memory.pop(key, None)
         else:
             continue
         changed = True
@@ -509,6 +510,12 @@ def _migrate_legacy_baked_defaults(config: dict[str, Any]) -> tuple[dict[str, An
         plugin_section["config_version"] = CURRENT_CONFIG_VERSION
 
     return config, changed
+
+
+def _dump_config_for_persist(config: dict[str, Any]) -> dict[str, Any]:
+    """生成可写回 config.toml 的配置（tomlkit 不支持 ``None``）。"""
+    validated = validate_plugin_config(PlasticMemoryConfig, config)
+    return validated.model_dump(mode="python", exclude_none=True)
 
 
 class PlasticMemoryPlugin(MaiBotPlugin):
@@ -588,7 +595,8 @@ class PlasticMemoryPlugin(MaiBotPlugin):
     ) -> tuple[dict[str, Any], bool]:
         normalized, changed = super().normalize_plugin_config(config_data)
         migrated, migrated_changed = _migrate_legacy_baked_defaults(normalized)
-        return migrated, changed or migrated_changed
+        persistable = _dump_config_for_persist(migrated)
+        return persistable, changed or migrated_changed or persistable != normalized
 
     def get_components(self) -> list[dict[str, Any]]:
         """收集组件，并按配置覆盖注入 Hook 的超时时间。

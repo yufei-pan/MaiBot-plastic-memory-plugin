@@ -17,6 +17,15 @@ sys.path.insert(0, str(PLUGIN_DIR))
 import plugin as plastic_plugin  # noqa: E402
 
 
+def _flatten_values(value: object) -> list[object]:
+    if isinstance(value, dict):
+        items: list[object] = []
+        for nested in value.values():
+            items.extend(_flatten_values(nested))
+        return items
+    return [value]
+
+
 def test_migrate_legacy_baked_defaults() -> None:
     legacy = {
         "plugin": {"enabled": True, "config_version": "1.2.0"},
@@ -42,15 +51,19 @@ def test_migrate_legacy_baked_defaults() -> None:
     migrated, changed = plastic_plugin._migrate_legacy_baked_defaults(deepcopy(legacy))
     assert changed
     assert migrated["plugin"]["config_version"] == plastic_plugin.CURRENT_CONFIG_VERSION
-    assert migrated["memory"]["size_limit"] is None
+    assert "size_limit" not in migrated["memory"]
     assert migrated["memory"]["note_file"] == ""
     assert migrated["memory"]["injection_template"] == ""
+
+    persistable = plastic_plugin._dump_config_for_persist(migrated)
+    assert all(value is not None for value in _flatten_values(persistable))
 
     custom = deepcopy(legacy)
     custom["memory"]["size_limit"] = 12000
     migrated_custom, custom_changed = plastic_plugin._migrate_legacy_baked_defaults(custom)
     assert custom_changed
     assert migrated_custom["memory"]["size_limit"] == 12000
+    assert all(value is not None for value in _flatten_values(plastic_plugin._dump_config_for_persist(migrated_custom)))
     print("ok: legacy baked defaults migrated with custom size_limit preserved")
 
 
