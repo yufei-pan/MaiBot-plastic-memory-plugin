@@ -10,6 +10,8 @@
 import asyncio
 import hashlib
 import re
+import shutil
+import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,6 +103,29 @@ DEFAULT_MAX_COMPACT_ATTEMPTS = 3
 DEFAULT_COMPACT_MODEL = "planner"
 DEFAULT_COMPACT_TEMPERATURE = 0.3
 DEFAULT_COMPACT_MAX_TOKENS = 0
+
+# config.toml 1.2.0 时代写进文件的默认值。运行时若字段仍等于这些值，视为「未自定义」，
+# 跟随当前代码内置 DEFAULT_*（不改写磁盘上的 config.toml）。
+_LEGACY_RUNTIME_DEFAULTS: dict[str, int | float | str | bool] = {
+    "size_limit": DEFAULT_SIZE_LIMIT,
+    "note_file": DEFAULT_NOTE_FILE,
+    "per_chat_size_limit": DEFAULT_PER_CHAT_SIZE_LIMIT,
+    "per_chat_note_folder": DEFAULT_PER_CHAT_NOTE_FOLDER,
+    "inject_when_empty": True,
+    "inject_to_planner": True,
+    "inject_to_replyer": True,
+    "max_compact_attempts": DEFAULT_MAX_COMPACT_ATTEMPTS,
+    "compact_model": DEFAULT_COMPACT_MODEL,
+    "compact_temperature": DEFAULT_COMPACT_TEMPERATURE,
+    "compact_max_tokens": DEFAULT_COMPACT_MAX_TOKENS,
+    "hook_timeout_ms": DEFAULT_HOOK_TIMEOUT_MS,
+    "injection_template": DEFAULT_INJECTION_TEMPLATE,
+    "replyer_injection_template": DEFAULT_REPLYER_INJECTION_TEMPLATE,
+    "stream_injection_section": DEFAULT_STREAM_INJECTION_SECTION,
+    "compact_prompt_template": DEFAULT_COMPACT_PROMPT_TEMPLATE,
+}
+
+SHIPPED_CONFIG_TEMPLATE_NAME = "config.default.toml"
 
 
 def _render(template: str, **values: Any) -> str:
@@ -407,111 +432,163 @@ class EffectiveMemoryConfig:
     compact_prompt_template: str
 
 
-def _effective_bool(value: bool | None, default: bool) -> bool:
+def _effective_bool(value: bool | None, default: bool, *, legacy: bool | None = None) -> bool:
     if value is None:
+        return default
+    if legacy is not None and bool(value) == legacy:
         return default
     return bool(value)
 
 
-def _effective_int(value: int | None, default: int, *, minimum: int = 0) -> int:
+def _effective_int(
+    value: int | None,
+    default: int,
+    *,
+    legacy: int | None = None,
+    minimum: int = 0,
+) -> int:
     if value is None:
+        return default
+    if legacy is not None and int(value) == legacy:
         return default
     return max(minimum, int(value))
 
 
-def _effective_float(value: float | None, default: float) -> float:
+def _effective_float(value: float | None, default: float, *, legacy: float | None = None) -> float:
     if value is None:
+        return default
+    if legacy is not None and float(value) == legacy:
         return default
     return float(value)
 
 
-def _effective_str(value: str | None, default: str) -> str:
+def _effective_str(value: str | None, default: str, *, legacy: str | None = None) -> str:
     if value is None or not str(value).strip():
+        return default
+    if legacy is not None and str(value).strip() == legacy:
         return default
     return str(value).strip()
-
-
-def _effective_template(value: str | None, default: str) -> str:
-    if value is None or not str(value).strip():
-        return default
-    return str(value)
-
-
-def resolve_effective_memory_config(memory: MemorySectionConfig) -> EffectiveMemoryConfig:
-    return EffectiveMemoryConfig(
-        size_limit=_effective_int(memory.size_limit, DEFAULT_SIZE_LIMIT, minimum=1),
-        note_file=_effective_str(memory.note_file, DEFAULT_NOTE_FILE),
-        per_chat_size_limit=_effective_int(memory.per_chat_size_limit, DEFAULT_PER_CHAT_SIZE_LIMIT, minimum=1),
-        per_chat_note_folder=_effective_str(memory.per_chat_note_folder, DEFAULT_PER_CHAT_NOTE_FOLDER),
-        inject_when_empty=_effective_bool(memory.inject_when_empty, True),
-        inject_to_planner=_effective_bool(memory.inject_to_planner, True),
-        inject_to_replyer=_effective_bool(memory.inject_to_replyer, True),
-        max_compact_attempts=_effective_int(memory.max_compact_attempts, DEFAULT_MAX_COMPACT_ATTEMPTS, minimum=1),
-        compact_model=_effective_str(memory.compact_model, DEFAULT_COMPACT_MODEL),
-        compact_temperature=_effective_float(memory.compact_temperature, DEFAULT_COMPACT_TEMPERATURE),
-        compact_max_tokens=max(0, _effective_int(memory.compact_max_tokens, DEFAULT_COMPACT_MAX_TOKENS)),
-        hook_timeout_ms=_effective_int(memory.hook_timeout_ms, DEFAULT_HOOK_TIMEOUT_MS, minimum=1),
-        injection_template=_effective_template(memory.injection_template, DEFAULT_INJECTION_TEMPLATE),
-        replyer_injection_template=_effective_template(
-            memory.replyer_injection_template, DEFAULT_REPLYER_INJECTION_TEMPLATE
-        ),
-        stream_injection_section=_effective_template(
-            memory.stream_injection_section, DEFAULT_STREAM_INJECTION_SECTION
-        ),
-        compact_prompt_template=_effective_template(
-            memory.compact_prompt_template, DEFAULT_COMPACT_PROMPT_TEMPLATE
-        ),
-    )
-
-
-_LEGACY_BAKED_MEMORY_DEFAULTS: dict[str, int | float | str | bool] = {
-    "size_limit": DEFAULT_SIZE_LIMIT,
-    "note_file": DEFAULT_NOTE_FILE,
-    "per_chat_size_limit": DEFAULT_PER_CHAT_SIZE_LIMIT,
-    "per_chat_note_folder": DEFAULT_PER_CHAT_NOTE_FOLDER,
-    "inject_when_empty": True,
-    "inject_to_planner": True,
-    "inject_to_replyer": True,
-    "max_compact_attempts": DEFAULT_MAX_COMPACT_ATTEMPTS,
-    "compact_model": DEFAULT_COMPACT_MODEL,
-    "compact_temperature": DEFAULT_COMPACT_TEMPERATURE,
-    "compact_max_tokens": DEFAULT_COMPACT_MAX_TOKENS,
-    "hook_timeout_ms": DEFAULT_HOOK_TIMEOUT_MS,
-    "injection_template": DEFAULT_INJECTION_TEMPLATE,
-    "replyer_injection_template": DEFAULT_REPLYER_INJECTION_TEMPLATE,
-    "stream_injection_section": DEFAULT_STREAM_INJECTION_SECTION,
-    "compact_prompt_template": DEFAULT_COMPACT_PROMPT_TEMPLATE,
-}
 
 
 def _canonical_template(value: str) -> str:
     return str(value).replace("\r\n", "\n").strip()
 
 
-def _migrate_legacy_baked_defaults(config: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    """将旧版 config.toml 中写死的默认值还原为占位空值，以便跟随代码内置默认。"""
-    memory = config.get("memory")
-    if not isinstance(memory, dict):
-        return config, False
+def _effective_template(value: str | None, default: str, *, legacy: str | None = None) -> str:
+    if value is None or not str(value).strip():
+        return default
+    if legacy is not None and _canonical_template(str(value)) == _canonical_template(legacy):
+        return default
+    return str(value)
 
-    changed = False
-    for key, legacy_value in _LEGACY_BAKED_MEMORY_DEFAULTS.items():
-        if key not in memory:
-            continue
-        current = memory[key]
-        if isinstance(legacy_value, str):
-            if _canonical_template(str(current)) != _canonical_template(str(legacy_value)):
-                continue
-        elif current != legacy_value:
-            continue
-        memory.pop(key, None)
-        changed = True
 
-    plugin_section = config.get("plugin")
-    if isinstance(plugin_section, dict):
-        plugin_section["config_version"] = CURRENT_CONFIG_VERSION
+def resolve_effective_memory_config(memory: MemorySectionConfig) -> EffectiveMemoryConfig:
+    legacy = _LEGACY_RUNTIME_DEFAULTS
+    return EffectiveMemoryConfig(
+        size_limit=_effective_int(
+            memory.size_limit,
+            DEFAULT_SIZE_LIMIT,
+            legacy=int(legacy["size_limit"]),
+            minimum=1,
+        ),
+        note_file=_effective_str(memory.note_file, DEFAULT_NOTE_FILE, legacy=str(legacy["note_file"])),
+        per_chat_size_limit=_effective_int(
+            memory.per_chat_size_limit,
+            DEFAULT_PER_CHAT_SIZE_LIMIT,
+            legacy=int(legacy["per_chat_size_limit"]),
+            minimum=1,
+        ),
+        per_chat_note_folder=_effective_str(
+            memory.per_chat_note_folder,
+            DEFAULT_PER_CHAT_NOTE_FOLDER,
+            legacy=str(legacy["per_chat_note_folder"]),
+        ),
+        inject_when_empty=_effective_bool(memory.inject_when_empty, True, legacy=bool(legacy["inject_when_empty"])),
+        inject_to_planner=_effective_bool(memory.inject_to_planner, True, legacy=bool(legacy["inject_to_planner"])),
+        inject_to_replyer=_effective_bool(memory.inject_to_replyer, True, legacy=bool(legacy["inject_to_replyer"])),
+        max_compact_attempts=_effective_int(
+            memory.max_compact_attempts,
+            DEFAULT_MAX_COMPACT_ATTEMPTS,
+            legacy=int(legacy["max_compact_attempts"]),
+            minimum=1,
+        ),
+        compact_model=_effective_str(memory.compact_model, DEFAULT_COMPACT_MODEL, legacy=str(legacy["compact_model"])),
+        compact_temperature=_effective_float(
+            memory.compact_temperature,
+            DEFAULT_COMPACT_TEMPERATURE,
+            legacy=float(legacy["compact_temperature"]),
+        ),
+        compact_max_tokens=max(
+            0,
+            _effective_int(
+                memory.compact_max_tokens,
+                DEFAULT_COMPACT_MAX_TOKENS,
+                legacy=int(legacy["compact_max_tokens"]),
+            ),
+        ),
+        hook_timeout_ms=_effective_int(
+            memory.hook_timeout_ms,
+            DEFAULT_HOOK_TIMEOUT_MS,
+            legacy=int(legacy["hook_timeout_ms"]),
+            minimum=1,
+        ),
+        injection_template=_effective_template(
+            memory.injection_template,
+            DEFAULT_INJECTION_TEMPLATE,
+            legacy=str(legacy["injection_template"]),
+        ),
+        replyer_injection_template=_effective_template(
+            memory.replyer_injection_template,
+            DEFAULT_REPLYER_INJECTION_TEMPLATE,
+            legacy=str(legacy["replyer_injection_template"]),
+        ),
+        stream_injection_section=_effective_template(
+            memory.stream_injection_section,
+            DEFAULT_STREAM_INJECTION_SECTION,
+            legacy=str(legacy["stream_injection_section"]),
+        ),
+        compact_prompt_template=_effective_template(
+            memory.compact_prompt_template,
+            DEFAULT_COMPACT_PROMPT_TEMPLATE,
+            legacy=str(legacy["compact_prompt_template"]),
+        ),
+    )
 
-    return config, changed
+
+def _is_runner_generated_bare_config(config_path: Path) -> bool:
+    """判断 ``config.toml`` 是否为 Runner/WebUI 重置后生成的无注释空壳。"""
+    if not config_path.exists():
+        return True
+    try:
+        text = config_path.read_text(encoding="utf-8")
+        raw = tomllib.loads(text)
+    except (OSError, tomllib.TOMLDecodeError):
+        return True
+    if any(line.lstrip().startswith("#") for line in text.splitlines()):
+        return False
+    memory = raw.get("memory")
+    return not isinstance(memory, dict) or not memory
+
+
+def _restore_shipped_config_template(plugin_dir: Path) -> bool:
+    """用插件自带的 ``config.default.toml`` 覆盖 Runner 生成的空壳配置。"""
+    config_path = plugin_dir / "config.toml"
+    template_path = plugin_dir / SHIPPED_CONFIG_TEMPLATE_NAME
+    if not template_path.exists() or not _is_runner_generated_bare_config(config_path):
+        return False
+    shutil.copy2(template_path, config_path)
+    return True
+
+
+def _load_config_dict_from_disk(plugin_dir: Path) -> dict[str, Any] | None:
+    config_path = plugin_dir / "config.toml"
+    if not config_path.exists():
+        return None
+    try:
+        loaded = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
 
 
 def _strip_none_deep(value: Any) -> Any:
@@ -571,6 +648,10 @@ class PlasticMemoryPlugin(MaiBotPlugin):
     # ------------------------------------------------------------------ #
     async def on_load(self) -> None:
         """插件加载：解析配置并初始化笔记存储。"""
+        if _restore_shipped_config_template(self._plugin_dir):
+            restored = _load_config_dict_from_disk(self._plugin_dir)
+            if restored is not None:
+                self.set_plugin_config(restored)
         self._refresh_config()
         note_path = self._resolve_note_path()
         self._global_store = NoteStore(note_path)
@@ -611,10 +692,16 @@ class PlasticMemoryPlugin(MaiBotPlugin):
     def normalize_plugin_config(
         self, config_data: Mapping[str, Any] | None
     ) -> tuple[dict[str, Any], bool]:
+        """归一化配置；落盘时保留用户文件中的字段与注释，不删除「仍为旧默认」的键。
+
+        - **磁盘**：升级 / 保存时不删键、不写 ``None``，尽量走 merge 保留注释。
+        - **运行时**：字段缺失，或仍等于 1.2.0 写死默认时，跟随当前代码 ``DEFAULT_*``（见
+          :func:`resolve_effective_memory_config`），**不**自动改写用户文件。
+        - **WebUI 重置**：Runner 会生成无注释空壳；:meth:`on_load` 用 ``config.default.toml`` 覆盖。
+        """
         normalized, changed = super().normalize_plugin_config(config_data)
-        migrated, migrated_changed = _migrate_legacy_baked_defaults(normalized)
-        persistable = _dump_config_for_persist(migrated)
-        return persistable, changed or migrated_changed or persistable != normalized
+        persistable = _dump_config_for_persist(normalized)
+        return persistable, changed or persistable != normalized
 
     def get_components(self) -> list[dict[str, Any]]:
         """收集组件，并按配置覆盖注入 Hook 的超时时间。

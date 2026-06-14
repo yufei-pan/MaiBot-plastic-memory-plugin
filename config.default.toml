@@ -1,0 +1,77 @@
+# 塑料内存条 (Plastic Memory) 插件配置
+#
+# [memory] 下的数值、字符串、布尔与模板字段留空（或不写）即使用插件代码中的内置默认；
+# 仅在你需要覆盖默认值时再填写。插件升级后修改内置默认时，留空字段会自动跟随新默认。
+
+[plugin]
+# 是否启用插件
+enabled = true
+# 配置版本
+config_version = "1.3.0"
+
+[memory]
+# 全局便利贴笔记的字符数上限（按字符计，不是字节）。超过后会触发 LLM 压缩。
+# size_limit = 8192
+# 全局便利贴笔记文件名/路径；相对路径会基于插件目录解析。
+# note_file = "my_memory.md"
+# 本聊天流便利贴笔记的字符数上限（按字符计，不是字节）。超过后会触发 LLM 压缩。
+# per_chat_size_limit = 4096
+# 本聊天流便利贴存放目录；相对路径会基于插件目录解析，每个聊天流对应 <stream_id>.md。
+# per_chat_note_folder = "chat_notes"
+# 笔记为空时是否仍然注入提示（让麦麦知道可以给自己留备忘）。
+# inject_when_empty = true
+# 是否在 planner / 时机判断请求中注入便利贴。
+# inject_to_planner = true
+# 是否在 replyer 回复请求中注入便利贴。
+# inject_to_replyer = true
+# 单次压缩中，当结果仍超过上限时允许递归重压缩的最大次数（防止死循环）。
+# max_compact_attempts = 3
+# 执行压缩时使用的 LLM 模型任务名；默认使用 planner 任务的模型。
+# compact_model = "planner"
+# 执行压缩时的采样温度。
+# compact_temperature = 0.3
+# 压缩 LLM 调用的最大 token 数；0 表示自动按 size_limit 的八倍计算
+# （为推理模型的 reasoning token 预留空间）。若该值小于 size_limit 会在日志中告警。
+# 若返回笔记少于 size_limit 的 80%，视为可能被截断，会临时将 max_tokens 翻倍并重试（最多 3 次）；
+# 多次调用后会选用最长的那次响应。
+# compact_max_tokens = 0
+# 注入 Hook 处理器的超时时间（毫秒），默认 60000（60 秒）。
+# hook_timeout_ms = 60000
+
+# planner / 时机判断注入模板。
+# 占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}
+# 说明性文字默认置于【全局便利贴】之前便于模型缓存，可自行调整各段顺序。
+# {stream_section} 由插件根据当前聊天流自动填充（无聊天流上下文时为空）。
+# injection_template = """以下便利贴是你（{nickname}）自己写给自己的备忘，每次请求都会注入在系统提示词之后，相当于一份你可随时自行修改的二级指令——写在这里的内容会持续影响你之后的思考与回复，请把它当作给自己的长期指令来对待与维护。可用 append_note、rewrite_note、compact_notes 维护（参数 scope 默认 global 记全局，stream 记本聊天流）。
+#
+# 【全局便利贴】
+# {note}
+# （{used}/{size_limit}）{stream_section}"""
+
+# replyer 注入模板（replyer 无工具调用能力，默认不提及维护方法）。
+# 占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}
+# replyer_injection_template = """以下是你（{nickname}）先前写给自己的备忘，请在思考与回复时参考。
+#
+# 【全局便利贴】
+# {note}
+# （{used}/{size_limit}）{stream_section}"""
+
+# 本聊天流便利贴注入子模板；渲染后填入 injection_template 的 {stream_section}。
+# 占位符：{stream_note}、{stream_used}、{stream_free}、{stream_size_limit}
+# stream_injection_section = """
+# 【本聊天流便利贴】
+# {stream_note}
+# （{stream_used}/{stream_size_limit}）"""
+
+# 压缩笔记时发给 LLM 的提示词模板。
+# 占位符：{nickname}、{personality}、{reply_style}、{note_scope}、{size_limit}、{used}、{note}
+# compact_prompt_template = """你是{nickname}。
+# 你的人格设定：{personality}
+# 你的表达风格：{reply_style}
+#
+# 下面这份{note_scope}便利贴笔记是你写给自己的备忘，但它太长了：当前 {used} 字符，必须压缩到 {size_limit} 字符以内。
+# 请你以{nickname}的身份重写这份笔记，在尽量保留关键信息、待办事项与重要事实的前提下让它更精炼。
+# 只输出压缩后的笔记正文本身，不要输出任何解释、前言或额外说明。
+#
+# 当前笔记内容：
+# {note}"""

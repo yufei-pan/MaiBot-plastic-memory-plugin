@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import shutil
 import tomllib
 from copy import deepcopy
 from pathlib import Path
@@ -18,7 +19,7 @@ sys.path.insert(0, str(PLUGIN_DIR))
 import tomlkit  # noqa: E402
 
 import plugin as plastic_plugin  # noqa: E402
-from maibot_sdk.config import merge_plugin_config_data, rebuild_plugin_config_data, validate_plugin_config  # noqa: E402
+from maibot_sdk.config import rebuild_plugin_config_data  # noqa: E402
 
 
 def _flatten_values(value: object) -> list[object]:
@@ -39,83 +40,75 @@ def _legacy_1_2_0_config() -> dict:
     return tomllib.loads(legacy_toml)
 
 
-def _simulate_v0_1_7_migrated_config() -> dict:
-    """复现 v0.1.7 迁移结果：键保留为 ``None``（tomlkit 无法落盘）。"""
-    raw = _legacy_1_2_0_config()
-    default = plastic_plugin.PlasticMemoryPlugin.build_default_config()
-    rebuilt = rebuild_plugin_config_data(default, raw)
-    merged, _ = merge_plugin_config_data(default, rebuilt)
-    normalized = validate_plugin_config(
-        plastic_plugin.PlasticMemoryConfig, merged
-    ).model_dump(mode="python")
-    migrated = deepcopy(normalized)
-    for key, legacy_value in plastic_plugin._LEGACY_BAKED_MEMORY_DEFAULTS.items():
-        if key not in migrated.get("memory", {}):
-            continue
-        current = migrated["memory"][key]
-        if isinstance(legacy_value, str):
-            if plastic_plugin._canonical_template(str(current)) != plastic_plugin._canonical_template(
-                str(legacy_value)
-            ):
-                continue
-            migrated["memory"][key] = ""
-        elif current == legacy_value:
-            migrated["memory"][key] = None
-    migrated["plugin"]["config_version"] = plastic_plugin.CURRENT_CONFIG_VERSION
-    return migrated
+def _has_extra_config_keys(existing_config: object, latest_config: object) -> bool:
+    if not isinstance(existing_config, dict) or not isinstance(latest_config, dict):
+        return False
+    for key, existing_value in existing_config.items():
+        if key not in latest_config:
+            return True
+        if _has_extra_config_keys(existing_value, latest_config[key]):
+            return True
+    return False
 
 
-def test_migrate_legacy_baked_defaults() -> None:
-    legacy = {
-        "plugin": {"enabled": True, "config_version": "1.2.0"},
-        "memory": {
-            "size_limit": 8192,
-            "note_file": "my_memory.md",
-            "per_chat_size_limit": 4096,
-            "per_chat_note_folder": "chat_notes",
-            "inject_when_empty": True,
-            "inject_to_planner": True,
-            "inject_to_replyer": True,
-            "max_compact_attempts": 3,
-            "compact_model": "planner",
-            "compact_temperature": 0.3,
-            "compact_max_tokens": 0,
-            "hook_timeout_ms": 60000,
-            "injection_template": plastic_plugin.DEFAULT_INJECTION_TEMPLATE,
-            "replyer_injection_template": plastic_plugin.DEFAULT_REPLYER_INJECTION_TEMPLATE,
-            "stream_injection_section": plastic_plugin.DEFAULT_STREAM_INJECTION_SECTION,
-            "compact_prompt_template": plastic_plugin.DEFAULT_COMPACT_PROMPT_TEMPLATE,
-        },
-    }
-    migrated, changed = plastic_plugin._migrate_legacy_baked_defaults(deepcopy(legacy))
-    assert changed
-    assert migrated["plugin"]["config_version"] == plastic_plugin.CURRENT_CONFIG_VERSION
-    assert migrated["memory"] == {}
+def test_legacy_runtime_default_follows_code_not_file() -> None:
+    """文件里仍是 1.2.0 写死默认时，运行时跟随当前代码默认（不改写磁盘）。"""
+    memory = plastic_plugin.MemorySectionConfig(size_limit=8192)
+    assert plastic_plugin.resolve_effective_memory_config(memory).size_limit == 8192
 
-    persistable = plastic_plugin._dump_config_for_persist(migrated)
-    assert all(value is not None for value in _flatten_values(persistable))
-
-    custom = deepcopy(legacy)
-    custom["memory"]["size_limit"] = 12000
-    migrated_custom, custom_changed = plastic_plugin._migrate_legacy_baked_defaults(custom)
-    assert custom_changed
-    assert migrated_custom["memory"]["size_limit"] == 12000
-    assert all(
-        value is not None
-        for value in _flatten_values(plastic_plugin._dump_config_for_persist(migrated_custom))
-    )
-    print("ok: legacy baked defaults migrated with custom size_limit preserved")
+    assert plastic_plugin._effective_int(8192, 16384, legacy=8192, minimum=1) == 16384
+    assert plastic_plugin._effective_int(12000, 16384, legacy=8192, minimum=1) == 12000
+    print("ok: legacy baked runtime values follow current code default")
 
 
-def test_runner_save_path_no_none() -> None:
-    """模拟 Runner 在 1.2.0 -> 1.3.0 升级时的落盘路径。"""
+def test_restore_shipped_config_template() -> None:
+    """Runner 生成的无注释空壳应被 config.default.toml 覆盖。"""
+    import tempfile
+
+    template_src = PLUGIN_DIR / "config.default.toml"
+    assert template_src.exists()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        plugin_dir = Path(tmp)
+        (plugin_dir / "config.toml").write_text(
+            '[plugin]\nenabled = true\nconfig_version = "1.3.0"\n',
+            encoding="utf-8",
+        )
+        shutil.copy2(template_src, plugin_dir / plastic_plugin.SHIPPED_CONFIG_TEMPLATE_NAME)
+        assert plastic_plugin._restore_shipped_config_template(plugin_dir)
+
+        restored_text = (plugin_dir / "config.toml").read_text(encoding="utf-8")
+        assert "# 塑料内存条" in restored_text
+        assert "# size_limit = 8192" in restored_text
+        assert plastic_plugin._is_runner_generated_bare_config(plugin_dir / "config.toml") is False
+    print("ok: bare config restored from shipped template")
+
+
+def test_version_upgrade_preserves_user_fields() -> None:
+    """1.2.0 -> 1.3.0 升级应保留用户显式配置，仅 bump config_version。"""
     raw = _legacy_1_2_0_config()
     default = plastic_plugin.PlasticMemoryPlugin.build_default_config()
     rebuilt = rebuild_plugin_config_data(default, raw)
     inst = plastic_plugin.create_plugin()
     normalized, _ = inst.normalize_plugin_config(rebuilt)
 
+    assert normalized["plugin"]["config_version"] == plastic_plugin.CURRENT_CONFIG_VERSION
+    assert normalized["memory"]["size_limit"] == 8192
+    assert normalized["memory"]["hook_timeout_ms"] == 60000
+    assert normalized["memory"]["injection_template"] == plastic_plugin.DEFAULT_INJECTION_TEMPLATE
     assert all(value is not None for value in _flatten_values(normalized))
+    print("ok: version upgrade keeps explicit user fields")
+
+
+def test_runner_save_path_preserves_content() -> None:
+    """模拟 Runner 落盘：升级后配置可 tomlkit 序列化，且不删光 memory 字段。"""
+    raw = _legacy_1_2_0_config()
+    default = plastic_plugin.PlasticMemoryPlugin.build_default_config()
+    rebuilt = rebuild_plugin_config_data(default, raw)
+    inst = plastic_plugin.create_plugin()
+    normalized, _ = inst.normalize_plugin_config(rebuilt)
+
+    assert normalized["memory"]["size_limit"] == 8192
     tomlkit.dumps(normalized)
 
     legacy_toml = subprocess.check_output(
@@ -126,45 +119,28 @@ def test_runner_save_path_no_none() -> None:
     existing_document = tomlkit.loads(legacy_toml)
     existing_config = existing_document.unwrap()
 
-    # 与 v0.1.7 相同：键保留、值为 None 时，merge 与 fallback 都会失败
-    broken = _simulate_v0_1_7_migrated_config()
-    try:
-        for key, value in broken.get("memory", {}).items():
-            existing_document["memory"][key] = tomlkit.item(value)
-        tomlkit.dumps(existing_document)
-        raise AssertionError("expected v0.1.7-style None merge to fail")
-    except Exception:
-        pass
-    try:
-        tomlkit.dumps(broken)
-        raise AssertionError("expected v0.1.7-style None fallback to fail")
-    except Exception:
-        pass
+    # 键未大量删除时不应触发「删键整文件重写」路径
+    assert not _has_extra_config_keys(existing_config, normalized)
 
-    # 当前实现：删除占位键后整文件重写应成功
-    if _has_extra_config_keys(existing_config, normalized):
-        tomlkit.dumps(normalized)
-    else:
-        for key, value in normalized.items():
-            if isinstance(value, dict) and key in existing_document:
-                for field, field_value in value.items():
-                    existing_document[key][field] = tomlkit.item(field_value)
-            else:
-                existing_document[key] = tomlkit.item(value)
-        tomlkit.dumps(existing_document)
-
-    print("ok: runner save path survives tomlkit dumps")
+    for key, value in normalized.items():
+        if isinstance(value, dict) and key in existing_document:
+            for field, field_value in value.items():
+                existing_document[key][field] = tomlkit.item(field_value)
+        else:
+            existing_document[key] = tomlkit.item(value)
+    dumped = tomlkit.dumps(existing_document)
+    assert "size_limit = 8192" in dumped
+    assert 'config_version = "1.3.0"' in dumped
+    print("ok: runner merge path keeps memory fields and comments")
 
 
-def _has_extra_config_keys(existing_config: object, latest_config: object) -> bool:
-    if not isinstance(existing_config, dict) or not isinstance(latest_config, dict):
-        return False
-    for key, existing_value in existing_config.items():
-        if key not in latest_config:
-            return True
-        if _has_extra_config_keys(existing_value, latest_config[key]):
-            return True
-    return False
+def test_none_values_never_persisted() -> None:
+    """模型默认 None 不得出现在落盘字典中（tomlkit 无法序列化）。"""
+    inst = plastic_plugin.create_plugin()
+    normalized, _ = inst.normalize_plugin_config({})
+    assert all(value is not None for value in _flatten_values(normalized))
+    tomlkit.dumps(normalized)
+    print("ok: empty input normalizes without None for persist")
 
 
 def test_resolve_effective_defaults() -> None:
@@ -193,11 +169,26 @@ def test_plugin_importable() -> None:
     print("ok: plugin importable, config model consistent")
 
 
+def test_custom_size_limit_preserved_on_upgrade() -> None:
+    raw = _legacy_1_2_0_config()
+    raw["memory"]["size_limit"] = 12000
+    default = plastic_plugin.PlasticMemoryPlugin.build_default_config()
+    rebuilt = rebuild_plugin_config_data(default, raw)
+    inst = plastic_plugin.create_plugin()
+    normalized, _ = inst.normalize_plugin_config(rebuilt)
+    assert normalized["memory"]["size_limit"] == 12000
+    print("ok: customized size_limit preserved on upgrade")
+
+
 def main() -> None:
     test_plugin_importable()
     test_resolve_effective_defaults()
-    test_migrate_legacy_baked_defaults()
-    test_runner_save_path_no_none()
+    test_legacy_runtime_default_follows_code_not_file()
+    test_restore_shipped_config_template()
+    test_version_upgrade_preserves_user_fields()
+    test_runner_save_path_preserves_content()
+    test_none_values_never_persisted()
+    test_custom_size_limit_preserved_on_upgrade()
     print("\n全部冒烟测试通过")
 
 
