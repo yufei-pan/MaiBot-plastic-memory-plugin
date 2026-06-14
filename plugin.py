@@ -484,6 +484,10 @@ _LEGACY_BAKED_MEMORY_DEFAULTS: dict[str, int | float | str | bool] = {
 }
 
 
+def _canonical_template(value: str) -> str:
+    return str(value).replace("\r\n", "\n").strip()
+
+
 def _migrate_legacy_baked_defaults(config: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """将旧版 config.toml 中写死的默认值还原为占位空值，以便跟随代码内置默认。"""
     memory = config.get("memory")
@@ -496,13 +500,11 @@ def _migrate_legacy_baked_defaults(config: dict[str, Any]) -> tuple[dict[str, An
             continue
         current = memory[key]
         if isinstance(legacy_value, str):
-            if str(current) != legacy_value:
+            if _canonical_template(str(current)) != _canonical_template(str(legacy_value)):
                 continue
-            memory[key] = ""
-        elif current == legacy_value:
-            memory.pop(key, None)
-        else:
+        elif current != legacy_value:
             continue
+        memory.pop(key, None)
         changed = True
 
     plugin_section = config.get("plugin")
@@ -512,10 +514,26 @@ def _migrate_legacy_baked_defaults(config: dict[str, Any]) -> tuple[dict[str, An
     return config, changed
 
 
+def _strip_none_deep(value: Any) -> Any:
+    """递归移除 ``None``，避免 Runner 用 tomlkit 落盘时失败。"""
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, nested in value.items():
+            if nested is None:
+                continue
+            stripped = _strip_none_deep(nested)
+            if stripped is None:
+                continue
+            cleaned[key] = stripped
+        return cleaned
+    return value
+
+
 def _dump_config_for_persist(config: dict[str, Any]) -> dict[str, Any]:
     """生成可写回 config.toml 的配置（tomlkit 不支持 ``None``）。"""
     validated = validate_plugin_config(PlasticMemoryConfig, config)
-    return validated.model_dump(mode="python", exclude_none=True)
+    dumped = validated.model_dump(mode="python", exclude_none=True)
+    return _strip_none_deep(dumped)
 
 
 class PlasticMemoryPlugin(MaiBotPlugin):
