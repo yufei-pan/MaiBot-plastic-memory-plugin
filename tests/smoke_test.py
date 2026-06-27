@@ -95,7 +95,12 @@ def test_version_upgrade_preserves_user_fields() -> None:
     assert normalized["plugin"]["config_version"] == plastic_plugin.CURRENT_CONFIG_VERSION
     assert normalized["memory"]["size_limit"] == 8192
     assert normalized["memory"]["hook_timeout_ms"] == 60000
-    assert normalized["memory"]["injection_template"] == plastic_plugin.DEFAULT_INJECTION_TEMPLATE
+    effective = plastic_plugin.resolve_effective_memory_config(
+        plastic_plugin.MemorySectionConfig(**normalized["memory"])
+    )
+    assert effective.injection_template == plastic_plugin.DEFAULT_INJECTION_TEMPLATE
+    assert effective.replyer_injection_template == plastic_plugin.DEFAULT_REPLYER_INJECTION_TEMPLATE
+    assert effective.stream_injection_section == plastic_plugin.DEFAULT_STREAM_INJECTION_SECTION
     assert all(value is not None for value in _flatten_values(normalized))
     print("ok: version upgrade keeps explicit user fields")
 
@@ -180,8 +185,35 @@ def test_custom_size_limit_preserved_on_upgrade() -> None:
     print("ok: customized size_limit preserved on upgrade")
 
 
+def test_instruction_write_feedback() -> None:
+    """演化指令写入工具：空内容不得静默写入/清空，且容忍 instruction/note/text 别名。"""
+    import asyncio
+    import tempfile
+
+    p = plastic_plugin.PlasticMemoryPlugin()
+    tmp = Path(tempfile.mkdtemp(prefix="pm-smoke-"))
+    p._global_store = plastic_plugin.NoteStore(tmp / "note.md")
+    p._size_limit = 100000
+    p._global_store.write("原有重要内容\n")
+
+    # 空 rewrite 必须被拒绝且不清空
+    asyncio.run(p.rewrite_instruction(content="", scope="global"))
+    assert p._global_store.read().strip() == "原有重要内容", "空 rewrite 不得清空演化指令"
+    # instruction 别名应正确覆盖
+    asyncio.run(p.rewrite_instruction(content="", scope="global", instruction="新演化指令内容"))
+    assert "新演化指令内容" in p._global_store.read()
+    # 空 append 必须被拒绝
+    before = p._global_store.read()
+    asyncio.run(p.append_instruction(content="", scope="global"))
+    assert p._global_store.read() == before, "空 append 不应改动演化指令"
+    # text 别名应生效
+    asyncio.run(p.append_instruction(content="", scope="global", text="追加的一段"))
+    assert "追加的一段" in p._global_store.read()
+
+
 def main() -> None:
     test_plugin_importable()
+    test_instruction_write_feedback()
     test_resolve_effective_defaults()
     test_legacy_runtime_default_follows_code_not_file()
     test_restore_shipped_config_template()

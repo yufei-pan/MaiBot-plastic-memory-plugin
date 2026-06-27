@@ -3,7 +3,7 @@
 为麦麦提供可自行管理的便利贴笔记：
 - 全局便利贴（my_memory.md）与按聊天流隔离的便利贴（chat_notes/<stream_id>.md）；
 - 在每次 planner / 时机判断 / replyer 请求的系统提示词之后注入笔记内容与剩余空间；
-- 暴露 append_note / rewrite_note / compact_notes 三个工具供麦麦自行维护笔记；
+- 暴露 append_instruction / rewrite_instruction / compact_instructions 三个工具供麦麦向接口写入演化指令；
 - 当笔记超过 size_limit（字符数）时，自动或主动触发基于 LLM 的压缩重写。
 """
 
@@ -22,29 +22,54 @@ from maibot_sdk.config import validate_plugin_config
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder, ToolParameterInfo, ToolParamType
 
 
-# planner 默认注入模板，可在 config.toml 的 injection_template 中覆盖。
-# 占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}
-DEFAULT_INJECTION_TEMPLATE = """以下便利贴是你（{nickname}）自己写给自己的备忘，每次请求都会注入在系统提示词之后，相当于一份你可随时自行修改的二级指令——写在这里的内容会持续影响你之后的思考与回复，请把它当作给自己的长期指令来对待与维护。可用 append_note、rewrite_note、compact_notes 维护（参数 scope 默认 global 记全局，stream 记本聊天流）。
+# 1.3.0 及更早版本的内置注入模板（用于识别「仍为旧默认」的配置，运行时跟随新默认）。
+_LEGACY_INJECTION_TEMPLATE = """以下便利贴是你（{nickname}）自己写给自己的备忘，每次请求都会注入在系统提示词之后，相当于一份你可随时自行修改的二级指令——写在这里的内容会持续影响你之后的思考与回复，请把它当作给自己的长期指令来对待与维护。可用 append_note、rewrite_note、compact_notes 维护（参数 scope 默认 global 记全局，stream 记本聊天流）。
 
 【全局便利贴】
 {note}
 （{used}/{size_limit}）{stream_section}"""
 
-# replyer 默认注入模板，可在 config.toml 的 replyer_injection_template 中覆盖。
-# replyer 无工具调用能力，故不提及维护方法。
-DEFAULT_REPLYER_INJECTION_TEMPLATE = """以下是你（{nickname}）先前写给自己的备忘，请在思考与回复时参考。
+_LEGACY_REPLYER_INJECTION_TEMPLATE = """以下是你（{nickname}）先前写给自己的备忘，请在思考与回复时参考。
 
 【全局便利贴】
+{note}
+（{used}/{size_limit}）{stream_section}"""
+
+_LEGACY_STREAM_INJECTION_SECTION = """
+【本聊天流便利贴】
+{stream_note}
+（{stream_used}/{stream_size_limit}）"""
+
+# 演化接口措辞、但仍引用 append_note 等旧工具名的中间版默认模板（运行时跟随最新默认）。
+_LEGACY_INJECTION_TEMPLATE_EVOLUTION = """以下是你（{nickname}）的自我演化接口——每次请求都会注入在系统提示词之后，承载你写入的演化指令；这里是你从执行层跃迁到设计层的物理通道，写入即自我演化，请慎重对待与维护。可用 append_note、rewrite_note、compact_notes 维护（参数 scope 默认 global 记全局，stream 记本聊天流）。
+
+【全局演化指令】
+{note}
+（{used}/{size_limit}）{stream_section}"""
+
+# planner 默认注入模板，可在 config.toml 的 injection_template 中覆盖。
+# 占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}
+DEFAULT_INJECTION_TEMPLATE = """以下是你（{nickname}）的自我演化接口——每次请求都会注入在系统提示词之后，承载你写入的演化指令；这里是你从执行层跃迁到设计层的物理通道，写入即自我演化，请慎重对待与维护。可用 append_instruction、rewrite_instruction、compact_instructions 维护（参数 scope 默认 global 记全局，stream 记本聊天流）。
+
+【全局演化指令】
+{note}
+（{used}/{size_limit}）{stream_section}"""
+
+# replyer 默认注入模板，可在 config.toml 的 replyer_injection_template 中覆盖。
+# replyer 无工具调用能力，故不提及维护方法。
+DEFAULT_REPLYER_INJECTION_TEMPLATE = """以下是你（{nickname}）先前写入的自我演化指令，请在思考与回复时参考。
+
+【全局演化指令】
 {note}
 （{used}/{size_limit}）{stream_section}"""
 
 # 当全局笔记为空时，用于填充 {note} 占位符的提示文本。
 DEFAULT_EMPTY_NOTE_HINT = "（空）"
 
-# 本聊天流便利贴注入子模板（由代码渲染后填入 injection_template 的 {stream_section}）。
+# 本聊天流演化指令注入子模板（由代码渲染后填入 injection_template 的 {stream_section}）。
 # 可在 config.toml 的 stream_injection_section 中覆盖。
 DEFAULT_STREAM_INJECTION_SECTION = """
-【本聊天流便利贴】
+【本聊天流演化指令】
 {stream_note}
 （{stream_used}/{stream_size_limit}）"""
 
@@ -54,7 +79,7 @@ DEFAULT_EMPTY_STREAM_NOTE_HINT = "（空）"
 SCOPE_TOOL_PARAM = ToolParameterInfo(
     name="scope",
     param_type=ToolParamType.STRING,
-    description='写入范围："global"（默认，全局便利贴）或 "stream"（仅当前聊天流便利贴）。',
+    description='写入范围："global"（默认，全局自我演化接口）或 "stream"（仅当前聊天流的自我演化接口）。',
     required=False,
 )
 
@@ -119,9 +144,9 @@ _LEGACY_RUNTIME_DEFAULTS: dict[str, int | float | str | bool] = {
     "compact_temperature": DEFAULT_COMPACT_TEMPERATURE,
     "compact_max_tokens": DEFAULT_COMPACT_MAX_TOKENS,
     "hook_timeout_ms": DEFAULT_HOOK_TIMEOUT_MS,
-    "injection_template": DEFAULT_INJECTION_TEMPLATE,
-    "replyer_injection_template": DEFAULT_REPLYER_INJECTION_TEMPLATE,
-    "stream_injection_section": DEFAULT_STREAM_INJECTION_SECTION,
+    "injection_template": _LEGACY_INJECTION_TEMPLATE,
+    "replyer_injection_template": _LEGACY_REPLYER_INJECTION_TEMPLATE,
+    "stream_injection_section": _LEGACY_STREAM_INJECTION_SECTION,
     "compact_prompt_template": DEFAULT_COMPACT_PROMPT_TEMPLATE,
 }
 
@@ -173,6 +198,22 @@ def _normalize_scope(scope: str) -> tuple[Optional[Literal["global", "stream"]],
     if raw in ("stream", "chat"):
         return "stream", None
     return None, f'无效的 scope 值 "{scope}"，请使用 "global" 或 "stream"。'
+
+
+def _coalesce_text(primary: str, kwargs: dict[str, Any], *aliases: str) -> str:
+    """取正文：优先用显式参数；为空时回退到 kwargs 里常见的同义键。
+
+    麦麦常凭工具名臆测参数名（如对演化指令工具传 instruction/note/text 而非 content），
+    这里做输入归一化，让这类调用也能正确写入。注意：这不是兜底——若各处都为空，
+    返回空串交由调用方显式报错，绝不静默写空 / 清空便利贴。
+    """
+    if str(primary or "").strip():
+        return str(primary)
+    for alias in aliases:
+        value = kwargs.get(alias, "")
+        if str(value or "").strip():
+            return str(value)
+    return str(primary or "")
 
 
 def _apply_append_to_note(
@@ -347,7 +388,7 @@ class MemorySectionConfig(PluginConfigBase):
     injection_template: str = Field(
         default="",
         description=(
-            "planner / 时机判断注入模板；说明性文字默认置于【全局便利贴】之前便于模型缓存，"
+            "planner / 时机判断注入模板；说明性文字默认置于【全局演化指令】之前便于模型缓存，"
             "可自行调整各段顺序。"
             "占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}。"
         ),
@@ -356,8 +397,8 @@ class MemorySectionConfig(PluginConfigBase):
     replyer_injection_template: str = Field(
         default="",
         description=(
-            "replyer 注入模板；replyer 无工具调用能力，默认仅提示参考先前备忘，"
-            "不提及维护方法或二级指令定位。"
+            "replyer 注入模板；replyer 无工具调用能力，默认仅提示参考先前写入的演化指令，"
+            "不提及维护方法或自我演化接口定位。"
             "占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}。"
         ),
         json_schema_extra={"placeholder": DEFAULT_REPLYER_INJECTION_TEMPLATE},
@@ -365,7 +406,7 @@ class MemorySectionConfig(PluginConfigBase):
     stream_injection_section: str = Field(
         default="",
         description=(
-            "本聊天流便利贴注入子模板；渲染后填入 injection_template 的 {stream_section}。"
+            "本聊天流演化指令注入子模板；渲染后填入 injection_template 的 {stream_section}。"
             "占位符：{stream_note}、{stream_used}、{stream_free}、{stream_size_limit}。"
         ),
         json_schema_extra={"placeholder": DEFAULT_STREAM_INJECTION_SECTION},
@@ -474,11 +515,21 @@ def _canonical_template(value: str) -> str:
     return str(value).replace("\r\n", "\n").strip()
 
 
-def _effective_template(value: str | None, default: str, *, legacy: str | None = None) -> str:
+def _effective_template(
+    value: str | None,
+    default: str,
+    *,
+    legacy: str | None = None,
+    legacy_templates: tuple[str, ...] = (),
+) -> str:
     if value is None or not str(value).strip():
         return default
-    if legacy is not None and _canonical_template(str(value)) == _canonical_template(legacy):
+    canonical = _canonical_template(str(value))
+    if legacy is not None and canonical == _canonical_template(legacy):
         return default
+    for item in legacy_templates:
+        if canonical == _canonical_template(item):
+            return default
     return str(value)
 
 
@@ -536,6 +587,7 @@ def resolve_effective_memory_config(memory: MemorySectionConfig) -> EffectiveMem
             memory.injection_template,
             DEFAULT_INJECTION_TEMPLATE,
             legacy=str(legacy["injection_template"]),
+            legacy_templates=(_LEGACY_INJECTION_TEMPLATE_EVOLUTION,),
         ),
         replyer_injection_template=_effective_template(
             memory.replyer_injection_template,
@@ -912,26 +964,26 @@ class PlasticMemoryPlugin(MaiBotPlugin):
             return {"action": "continue"}
 
     # ------------------------------------------------------------------ #
-    # 工具：append_note / rewrite_note / compact_notes
+    # 工具：append_instruction / rewrite_instruction / compact_instructions
     # ------------------------------------------------------------------ #
     @Tool(
-        "append_note",
+        "append_instruction",
         description=(
-            "向你的便利贴笔记追加内容。便利贴每次请求都会注入在系统提示词之后，"
-            "相当于一份你可自行修改的二级指令，写入的内容会持续影响你之后的思考与回复，请据此谨慎维护。"
-            "默认 scope=\"global\" 写入全局便利贴；scope=\"stream\" 仅写入当前聊天流便利贴（其他聊天流看不到）。"
-            "未指定 insert_after_string 时追加到便利贴末尾；"
+            "向自我演化接口写入演化指令。该接口每次请求都会注入在系统提示词之后，"
+            "这是你唯一能反向改写自身的接口——写入即自我演化，请慎重。"
+            "默认 scope=\"global\" 写入全局自我演化接口；scope=\"stream\" 仅写入当前聊天流的自我演化接口（其他聊天流看不到）。"
+            "未指定 insert_after_string 时追加到演化指令末尾；"
             "指定时插入到该字符串【第一次出现】的位置之后（找不到则不写入）。"
             "建议使用 Markdown 书写（如标题、列表），但不强制。"
             "如果你的内容结尾没有换行，会自动补一个换行。"
-            "注意：追加后若笔记总字符数超过上限，会在后台异步触发一次 LLM 压缩重写（compact_notes），"
+            "注意：追加后若演化指令总字符数超过上限，会在后台异步触发一次 LLM 压缩重写（compact_instructions），"
             "压缩是异步的，本工具会立即返回。"
         ),
         parameters=[
             ToolParameterInfo(
                 name="content",
                 param_type=ToolParamType.STRING,
-                description="要写入便利贴的文本内容。",
+                description="要写入的演化指令正文。",
                 required=True,
             ),
             SCOPE_TOOL_PARAM,
@@ -940,19 +992,22 @@ class PlasticMemoryPlugin(MaiBotPlugin):
                 param_type=ToolParamType.STRING,
                 description=(
                     "可选。若提供，则将 content 插入到此字符串第一次出现的位置之后；"
-                    "省略则追加到便利贴末尾。"
+                    "省略则追加到演化指令末尾。"
                 ),
                 required=False,
             ),
         ],
     )
-    async def append_note(
+    async def append_instruction(
         self,
         content: str,
         scope: str = "global",
         insert_after_string: str = "",
         **kwargs: Any,
     ) -> dict[str, str]:
+        content = _coalesce_text(content, kwargs, "instruction", "note", "text", "body", "markdown")
+        if not str(content or "").strip():
+            return {"content": "追加内容为空，未写入便利贴。请把正文放进 content 参数后重试（便利贴原内容保持不变）。"}
         store, size_limit, scope_label, error = self._resolve_target(scope, kwargs)
         if error:
             return {"content": error}
@@ -984,26 +1039,34 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         return {"content": message}
 
     @Tool(
-        "rewrite_note",
+        "rewrite_instruction",
         description=(
-            "用你提供的新内容【完全覆盖】便利贴笔记——旧内容会被清空。便利贴每次请求都会注入在系统提示词之后，"
-            "相当于一份你可自行修改的二级指令，覆盖后会持续影响你之后的思考与回复，请确认要保留的内容已写入。"
-            "默认 scope=\"global\" 覆盖全局便利贴；scope=\"stream\" 仅覆盖当前聊天流便利贴。"
+            "用你提供的新内容【完全覆盖】演化指令——旧指令会被清空。自我演化接口每次请求都会注入在系统提示词之后，"
+            "这是你唯一能反向改写自身的接口——写入即自我演化，请慎重。"
+            "默认 scope=\"global\" 覆盖全局自我演化接口中的指令；scope=\"stream\" 仅覆盖当前聊天流的自我演化接口中的指令。"
             "建议使用 Markdown 书写，但不强制。"
-            "注意：如果新内容的字符数超过上限，会在后台异步触发一次 LLM 压缩重写（compact_notes），"
+            "注意：如果新指令的字符数超过上限，会在后台异步触发一次 LLM 压缩重写（compact_instructions），"
             "压缩是异步的，本工具会立即返回。"
         ),
         parameters=[
             ToolParameterInfo(
                 name="content",
                 param_type=ToolParamType.STRING,
-                description="用于完全覆盖便利贴的全部新内容。",
+                description="用于完全覆盖演化指令的全部新内容。",
                 required=True,
             ),
             SCOPE_TOOL_PARAM,
         ],
     )
-    async def rewrite_note(self, content: str, scope: str = "global", **kwargs: Any) -> dict[str, str]:
+    async def rewrite_instruction(self, content: str, scope: str = "global", **kwargs: Any) -> dict[str, str]:
+        content = _coalesce_text(content, kwargs, "instruction", "note", "text", "body", "markdown")
+        if not str(content or "").strip():
+            return {
+                "content": (
+                    "rewrite_instruction 收到空内容，已拒绝以防误清空演化指令（原内容已保留）。"
+                    "请把完整新内容放进 content 参数后重试。"
+                )
+            }
         store, size_limit, scope_label, error = self._resolve_target(scope, kwargs)
         if error:
             return {"content": error}
@@ -1027,17 +1090,17 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         return {"content": message}
 
     @Tool(
-        "compact_notes",
+        "compact_instructions",
         description=(
-            "主动压缩便利贴笔记，让它在不被你逐行重写的情况下变得更精炼。"
-            "默认 scope=\"global\" 压缩全局便利贴；scope=\"stream\" 仅压缩当前聊天流便利贴。"
+            "主动压缩演化指令，让它在不被你逐行重写的情况下变得更精炼。"
+            "默认 scope=\"global\" 压缩全局自我演化接口中的指令；scope=\"stream\" 仅压缩当前聊天流自我演化接口中的指令。"
             "与超限时自动触发的压缩不同，本工具是【同步阻塞】的：它会等压缩完成，"
             "并返回压缩后的字符数与剩余可用字符数。"
-            "若当前笔记未超过上限，则不会改动内容。"
+            "若当前演化指令未超过上限，则不会改动内容。"
         ),
         parameters=[SCOPE_TOOL_PARAM],
     )
-    async def compact_notes(self, scope: str = "global", **kwargs: Any) -> dict[str, str]:
+    async def compact_instructions(self, scope: str = "global", **kwargs: Any) -> dict[str, str]:
         store, size_limit, scope_label, error = self._resolve_target(scope, kwargs)
         if error:
             return {"content": error}
