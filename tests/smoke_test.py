@@ -201,24 +201,28 @@ def test_build_rewrite_payload_excludes_host_context() -> None:
 
 
 def test_empty_content_with_host_context_skips_llm() -> None:
-    """无实质正文时，即使 Host 注入 stream_id 等 kwargs 也不得调用 LLM。"""
-    import asyncio
-
+    """无实质正文时，即使 Host 注入 stream_id 等 kwargs 也不得触发后台整理。"""
     p = plastic_plugin.PlasticMemoryPlugin()
     p._llm_rewrite_writes = True
 
-    content, notice = asyncio.run(
-        p._resolve_instruction_content(
-            "rewrite_instruction",
-            "",
-            "全局",
-            8192,
-            {"stream_id": "test-stream", "chat_id": "test-stream"},
-        )
+    content, payload, notice = p._prepare_instruction_write(
+        "",
+        {"stream_id": "test-stream", "chat_id": "test-stream"},
     )
     assert content == ""
+    assert payload == ""
     assert notice == ""
     print("ok: empty content with host context skips llm")
+
+
+def test_prepare_instruction_write_schedules_async_notice() -> None:
+    p = plastic_plugin.PlasticMemoryPlugin()
+    p._llm_rewrite_writes = True
+    content, payload, notice = p._prepare_instruction_write("原始正文", {"scope": "global"})
+    assert content == "原始正文"
+    assert "原始正文" in payload
+    assert "后台" in notice
+    print("ok: prepare instruction write returns async notice")
 
 
 def test_build_rewrite_payload_excludes_scope_and_anchor() -> None:
@@ -362,6 +366,7 @@ def main() -> None:
     test_resolve_rewrite_max_tokens_uses_size_limit_multiplier()
     test_build_rewrite_payload_excludes_host_context()
     test_empty_content_with_host_context_skips_llm()
+    test_prepare_instruction_write_schedules_async_notice()
     test_build_rewrite_payload_excludes_scope_and_anchor()
     test_inject_continues_when_one_scope_read_fails()
     test_compact_restores_when_file_cleared_during_llm()

@@ -4,7 +4,7 @@
 - 全局演化指令（my_memory.md）与按聊天流隔离的演化指令（chat_notes/<stream_id>.md）；
 - 在每次 planner / 时机判断 / replyer 请求的系统提示词之后注入演化指令与剩余空间；
 - 暴露 append_instruction / rewrite_instruction / compact_instructions 三个工具供麦麦向接口写入演化指令；
-- append / rewrite 默认经 LLM（replyer）整理 planner 原始工具参数后再落盘，可关 llm_rewrite_writes 回退直写；
+- append / rewrite 默认先落盘原始参数，再经后台 LLM（replyer）整理替换，可关 llm_rewrite_writes 回退直写；
 - 当演化指令超过 size_limit（字符数）时，自动或主动触发基于 LLM（replyer）的压缩重写。
 """
 
@@ -86,6 +86,9 @@ SCOPE_TOOL_PARAM = ToolParameterInfo(
 
 # HookHandler 处理器的默认超时时间（毫秒）。可通过 config.toml 的 hook_timeout_ms 覆盖。
 DEFAULT_HOOK_TIMEOUT_MS = 60000
+
+# 后台 LLM 整理单次 cap.call 超时（毫秒）；取 max(此值, hook_timeout_ms)。
+DEFAULT_REWRITE_LLM_TIMEOUT_MS = 120000
 
 # compact_max_tokens = 0 时，自动 max_tokens = size_limit * 此倍数（推理模型会消耗大量 reasoning token）。
 AUTO_COMPACT_MAX_TOKENS_MULTIPLIER = 8
@@ -176,7 +179,7 @@ _WRITE_KWARG_EXCLUDE = frozenset(
     }
 )
 
-_LLM_REWRITE_FALLBACK_NOTICE = " LLM 整理未成功，已使用原始参数写入。"
+_LLM_REWRITE_ASYNC_NOTICE = " LLM 整理在后台进行。"
 
 
 class NoteStoreReadError(OSError):
@@ -391,6 +394,12 @@ def _extract_compact_response(result: dict[str, Any]) -> str:
     return _extract_llm_response(result)
 
 
+def _is_rpc_timeout(exc: BaseException) -> bool:
+    """判断异常是否为 Host/Runner RPC 超时。"""
+    message = str(exc)
+    return "E_TIMEOUT" in message or "超时" in message
+
+
 class NoteStore:
     """演化指令文件的读写封装。
 
@@ -535,7 +544,7 @@ class MemorySectionConfig(PluginConfigBase):
         json_schema_extra={"placeholder": "true"},
         description=(
             "append_instruction / rewrite_instruction 写入前是否经 LLM 整理 planner 原始工具参数。"
-            "默认开启（v0.3.0 起）；关闭时回退为直接合并 content 及 instruction/note/text 等别名。"
+            "默认开启（v0.3.0 起）：先原样落盘，再在后台整理替换；关闭时仅直写落盘。"
         ),
     )
     rewrite_model: str | None = Field(
@@ -903,7 +912,7 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         )
 
     async def on_unload(self) -> None:
-        """插件卸载：取消所有后台压缩任务。"""
+        """插件卸载：取消所有后台任务。"""
         for task in list(self._pending):
             task.cancel()
         self._pending.clear()
@@ -1171,34 +1180,29 @@ class PlasticMemoryPlugin(MaiBotPlugin):
             self.ctx.logger.warning("演化指令注入失败，已跳过: %s", exc, exc_info=True)
             return {"action": "continue"}
 
-    async def _resolve_instruction_content(
+    def _prepare_instruction_write(
         self,
-        tool_name: str,
         content: str,
-        scope_label: str,
-        size_limit: int,
         kwargs: dict[str, Any],
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, str]:
         """解析 append / rewrite 待写入正文。
 
-        返回 ``(正文, 附加说明)``。开启 ``llm_rewrite_writes`` 时，仅在有实质正文
-        （``_coalesce_text`` 非空）时才调用 LLM；失败回退时在附加说明中明示。
+        返回 ``(正文, 后台整理 payload, 工具返回附加说明)``。开启 ``llm_rewrite_writes`` 时
+        先写入合并后的原始正文，再在后台调用 LLM 整理并替换（与 compact 相同，不阻塞工具）。
         """
         raw_fallback = _coalesce_text(content, kwargs, "instruction", "note", "text", "body", "markdown")
 
         if not raw_fallback.strip():
-            return "", ""
+            return "", "", ""
 
         if not self._llm_rewrite_writes:
-            return raw_fallback, ""
+            return raw_fallback, "", ""
 
         raw_payload = _build_rewrite_payload(content, kwargs)
-        if raw_payload.strip():
-            rewritten = await self._rewrite_write_payload(tool_name, scope_label, size_limit, raw_payload)
-            if rewritten.strip():
-                return rewritten, ""
+        if not raw_payload.strip():
+            return raw_fallback, "", ""
 
-        return raw_fallback, _LLM_REWRITE_FALLBACK_NOTICE
+        return raw_fallback, raw_payload, _LLM_REWRITE_ASYNC_NOTICE
 
     async def _rewrite_write_payload(
         self,
@@ -1212,6 +1216,7 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         personality = await self.ctx.config.get("personality.personality", "") or ""
         reply_style = await self.ctx.config.get("personality.reply_style", "") or ""
         max_tokens = _resolve_rewrite_max_tokens(self._rewrite_max_tokens, size_limit)
+        rewrite_timeout_ms = max(self._hook_timeout_ms, DEFAULT_REWRITE_LLM_TIMEOUT_MS)
         prompt = _render(
             self._rewrite_prompt_template,
             nickname=nickname,
@@ -1229,6 +1234,7 @@ class PlasticMemoryPlugin(MaiBotPlugin):
                     model=self._rewrite_model,
                     temperature=self._rewrite_temperature,
                     max_tokens=max_tokens,
+                    timeout_ms=rewrite_timeout_ms,
                 )
             except Exception as exc:
                 self.ctx.logger.warning(
@@ -1238,6 +1244,8 @@ class PlasticMemoryPlugin(MaiBotPlugin):
                     exc,
                     exc_info=True,
                 )
+                if _is_rpc_timeout(exc):
+                    break
                 continue
             if not result.get("success"):
                 self.ctx.logger.warning(
@@ -1256,6 +1264,115 @@ class PlasticMemoryPlugin(MaiBotPlugin):
                 attempt,
             )
         return ""
+
+    def _schedule_write_polish(
+        self,
+        store: NoteStore,
+        size_limit: int,
+        scope_label: str,
+        tool_name: str,
+        raw_payload: str,
+        written_snapshot: str,
+        raw_written: str,
+        *,
+        rewrite_mode: bool,
+    ) -> None:
+        """调度后台 LLM 整理任务（非阻塞）。"""
+        task = asyncio.create_task(
+            self._safe_write_polish(
+                store,
+                size_limit,
+                scope_label,
+                tool_name,
+                raw_payload,
+                written_snapshot,
+                raw_written,
+                rewrite_mode=rewrite_mode,
+            )
+        )
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+
+    async def _safe_write_polish(
+        self,
+        store: NoteStore,
+        size_limit: int,
+        scope_label: str,
+        tool_name: str,
+        raw_payload: str,
+        written_snapshot: str,
+        raw_written: str,
+        *,
+        rewrite_mode: bool,
+    ) -> None:
+        """后台 LLM 整理包装：吞掉异常仅记录日志。"""
+        try:
+            await self._apply_write_polish(
+                store,
+                size_limit,
+                scope_label,
+                tool_name,
+                raw_payload,
+                written_snapshot,
+                raw_written,
+                rewrite_mode=rewrite_mode,
+            )
+        except asyncio.CancelledError:
+            raise
+        except NoteStoreReadError as exc:
+            self.ctx.logger.warning("%s演化指令读取失败，后台 LLM 整理已跳过: %s", scope_label, exc)
+        except Exception as exc:
+            self.ctx.logger.warning("%s演化指令后台 LLM 整理失败: %s", scope_label, exc, exc_info=True)
+
+    async def _apply_write_polish(
+        self,
+        store: NoteStore,
+        size_limit: int,
+        scope_label: str,
+        tool_name: str,
+        raw_payload: str,
+        written_snapshot: str,
+        raw_written: str,
+        *,
+        rewrite_mode: bool,
+    ) -> None:
+        """在锁外调用 LLM 整理，写回前校验快照未被并发修改。"""
+        polished = await self._rewrite_write_payload(tool_name, scope_label, size_limit, raw_payload)
+        if not polished.strip():
+            self.ctx.logger.warning("%s演化指令后台 LLM 整理未产出内容，保留原始写入", scope_label)
+            return
+        if not polished.endswith("\n"):
+            polished += "\n"
+
+        async with store.lock:
+            current = store.read()
+            if current != written_snapshot:
+                self.ctx.logger.info(
+                    "%s演化指令在后台整理期间被修改，跳过整理写入",
+                    scope_label,
+                )
+                return
+            if rewrite_mode:
+                final = polished
+            else:
+                segment_index = current.find(raw_written)
+                if segment_index < 0:
+                    self.ctx.logger.warning(
+                        "%s演化指令后台整理找不到原始片段，跳过整理写入",
+                        scope_label,
+                    )
+                    return
+                final = current[:segment_index] + polished + current[segment_index + len(raw_written) :]
+            store.write(final)
+
+        self.ctx.logger.info(
+            "%s演化指令后台 LLM 整理完成，当前 %d 字符（上限 %d）",
+            scope_label,
+            len(final),
+            size_limit,
+        )
+        if len(final) > size_limit:
+            self._schedule_compact(store, size_limit, scope_label)
 
     def _empty_write_error(self, tool_name: str, *, rewrite: bool) -> str:
         if rewrite:
@@ -1279,12 +1396,10 @@ class PlasticMemoryPlugin(MaiBotPlugin):
             "默认 scope=\"global\" 写入全局自我演化接口；scope=\"stream\" 仅写入当前聊天流的自我演化接口（其他聊天流看不到）。"
             "未指定 insert_after_string 时追加到演化指令末尾；"
             "指定时插入到该字符串【第一次出现】的位置之后（找不到则不写入）。"
-            "默认会将除 insert_after_string 外的工具参数交给 LLM 整理为演化指令正文（可关 llm_rewrite_writes）。"
+            "默认会将工具参数先原样落盘，再在后台经 LLM 整理为演化指令正文（可关 llm_rewrite_writes）。"
             "content 可省略，也可通过 instruction、note、text 等参数传正文。"
             "建议使用 Markdown 书写（如标题、列表），但不强制。"
-            "如果你的内容结尾没有换行，会自动补一个换行。"
-            "注意：追加后若演化指令总字符数超过上限，会在后台异步触发一次 LLM 压缩重写（compact_instructions），"
-            "压缩是异步的，本工具会立即返回。"
+            "LLM 整理与超限压缩均在后台异步进行，本工具会立即返回。"
         ),
         parameters=[
             ToolParameterInfo(
@@ -1316,13 +1431,7 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         if error:
             return {"content": error}
 
-        resolved, notice = await self._resolve_instruction_content(
-            "append_instruction",
-            content,
-            scope_label,
-            size_limit,
-            kwargs,
-        )
+        resolved, polish_payload, notice = self._prepare_instruction_write(content, kwargs)
         if not resolved.strip():
             return {"content": self._empty_write_error("append_instruction", rewrite=False)}
 
@@ -1340,7 +1449,20 @@ class PlasticMemoryPlugin(MaiBotPlugin):
                 return {"content": append_error}
 
             store.write(new_content)
+            written_snapshot = new_content
             used = len(new_content)
+
+        if polish_payload:
+            self._schedule_write_polish(
+                store,
+                size_limit,
+                scope_label,
+                "append_instruction",
+                polish_payload,
+                written_snapshot,
+                resolved,
+                rewrite_mode=False,
+            )
 
         over = used > size_limit
         if over:
@@ -1363,11 +1485,10 @@ class PlasticMemoryPlugin(MaiBotPlugin):
             "用你提供的新内容【完全覆盖】演化指令——旧指令会被清空。自我演化接口每次请求都会注入在系统提示词之后，"
             "这是你唯一能反向改写自身的接口——写入即自我演化，请慎重。"
             "默认 scope=\"global\" 覆盖全局自我演化接口中的指令；scope=\"stream\" 仅覆盖当前聊天流的自我演化接口中的指令。"
-            "默认会将工具参数交给 LLM 整理为演化指令正文（可关 llm_rewrite_writes）。"
+            "默认会将工具参数先原样落盘，再在后台经 LLM 整理为演化指令正文（可关 llm_rewrite_writes）。"
             "content 可省略，也可通过 instruction、note、text 等参数传正文。"
             "建议使用 Markdown 书写，但不强制。"
-            "注意：如果新指令的字符数超过上限，会在后台异步触发一次 LLM 压缩重写（compact_instructions），"
-            "压缩是异步的，本工具会立即返回。"
+            "LLM 整理与超限压缩均在后台异步进行，本工具会立即返回。"
         ),
         parameters=[
             ToolParameterInfo(
@@ -1384,13 +1505,7 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         if error:
             return {"content": error}
 
-        resolved, notice = await self._resolve_instruction_content(
-            "rewrite_instruction",
-            content,
-            scope_label,
-            size_limit,
-            kwargs,
-        )
+        resolved, polish_payload, notice = self._prepare_instruction_write(content, kwargs)
         if not resolved.strip():
             return {"content": self._empty_write_error("rewrite_instruction", rewrite=True)}
 
@@ -1403,7 +1518,20 @@ class PlasticMemoryPlugin(MaiBotPlugin):
             if new_content and not new_content.endswith("\n"):
                 new_content += "\n"
             store.write(new_content)
+            written_snapshot = new_content
             used = len(new_content)
+
+        if polish_payload:
+            self._schedule_write_polish(
+                store,
+                size_limit,
+                scope_label,
+                "rewrite_instruction",
+                polish_payload,
+                written_snapshot,
+                resolved if resolved.endswith("\n") else resolved + "\n",
+                rewrite_mode=True,
+            )
 
         over = used > size_limit
         if over:
