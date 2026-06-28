@@ -225,6 +225,13 @@ def test_prepare_instruction_write_schedules_async_notice() -> None:
     print("ok: prepare instruction write returns async notice")
 
 
+def test_default_prompt_templates_recommend_markdown() -> None:
+    assert "Markdown" in plastic_plugin.DEFAULT_REWRITE_PROMPT_TEMPLATE
+    assert "Markdown" in plastic_plugin.DEFAULT_COMPACT_PROMPT_TEMPLATE
+    assert "Markdown 代码块包裹" not in plastic_plugin.DEFAULT_REWRITE_PROMPT_TEMPLATE
+    print("ok: default prompt templates recommend markdown")
+
+
 def test_build_rewrite_payload_excludes_scope_and_anchor() -> None:
     payload = plastic_plugin._build_rewrite_payload(
         "",
@@ -367,6 +374,7 @@ def main() -> None:
     test_build_rewrite_payload_excludes_host_context()
     test_empty_content_with_host_context_skips_llm()
     test_prepare_instruction_write_schedules_async_notice()
+    test_default_prompt_templates_recommend_markdown()
     test_build_rewrite_payload_excludes_scope_and_anchor()
     test_inject_continues_when_one_scope_read_fails()
     test_compact_restores_when_file_cleared_during_llm()

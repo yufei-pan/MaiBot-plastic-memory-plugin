@@ -156,7 +156,7 @@ max_rewrite_attempts = 3
 **`compact_model`** — 压缩使用的 LLM 任务名。默认 `replyer`  
 **`compact_temperature`** — 压缩采样温度。默认 `0.3`  
 **`compact_max_tokens`** — 压缩 `max_tokens`；`0` 表示按对应 `size_limit × 8` 自动计算。默认 `0`  
-**`compact_prompt_template`** — 压缩时发给 LLM 的提示词模板
+**`compact_prompt_template`** — 压缩时发给 LLM 的提示词模板（默认引导输出精炼 Markdown，保留标题/列表结构）
 
 #### 写入整理
 
@@ -165,7 +165,7 @@ max_rewrite_attempts = 3
 **`rewrite_temperature`** — 写入整理采样温度。默认 `0.3`  
 **`rewrite_max_tokens`** — 写入整理 `max_tokens`；`0` 表示按对应 `size_limit × 8` 自动计算（与 compact 相同）。默认 `0`  
 **`max_rewrite_attempts`** — LLM 返回空时的重试次数；仍失败则回退原始参数合并。默认 `3`  
-**`rewrite_prompt_template`** — 写入整理时发给 LLM 的提示词模板
+**`rewrite_prompt_template`** — 写入整理时发给 LLM 的提示词模板（默认引导输出 Markdown 正文，勿用代码块包裹整篇）
 
 ---
 
