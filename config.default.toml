@@ -7,7 +7,7 @@
 # 是否启用插件
 enabled = true
 # 配置版本
-config_version = "1.3.0"
+config_version = "1.4.0"
 
 [memory]
 # 全局演化指令的字符数上限（按字符计，不是字节）。超过后会触发 LLM 压缩。
@@ -26,8 +26,8 @@ config_version = "1.3.0"
 # inject_to_replyer = true
 # 单次压缩中，当结果仍超过上限时允许递归重压缩的最大次数（防止死循环）。
 # max_compact_attempts = 3
-# 执行压缩时使用的 LLM 模型任务名；默认使用 planner 任务的模型。
-# compact_model = "planner"
+# 执行压缩时使用的 LLM 模型任务名；默认使用 replyer 任务的模型。
+# compact_model = "replyer"
 # 执行压缩时的采样温度。
 # compact_temperature = 0.3
 # 压缩 LLM 调用的最大 token 数；0 表示自动按 size_limit 的八倍计算
@@ -35,6 +35,19 @@ config_version = "1.3.0"
 # 若返回演化指令少于 size_limit 的 80%，视为可能被截断，会临时将 max_tokens 翻倍并重试（最多 3 次）；
 # 多次调用后会选用最长的那次响应。
 # compact_max_tokens = 0
+# append_instruction / rewrite_instruction 写入前是否经 LLM 整理 planner 原始工具参数（默认开启）。
+# llm_rewrite_writes = true
+# 写入整理时使用的 LLM 模型任务名；默认使用 replyer 任务的模型。
+# rewrite_model = "replyer"
+# 写入整理时的采样温度。
+# rewrite_temperature = 0.3
+# 写入整理 LLM 调用的最大 token 数；0 表示自动取 max(4096, size_limit)。
+# rewrite_max_tokens = 0
+# 写入整理 LLM 返回空内容时的最大重试次数；仍失败则回退为原始参数合并结果。
+# max_rewrite_attempts = 3
+# 写入整理时发给 LLM 的提示词模板。
+# 占位符：{nickname}、{personality}、{reply_style}、{tool_name}、{note_scope}、{raw_payload}
+# rewrite_prompt_template = """..."""
 # 注入 Hook 处理器的超时时间（毫秒），默认 60000（60 秒）。
 # hook_timeout_ms = 60000
 

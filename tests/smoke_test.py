@@ -71,7 +71,7 @@ def test_restore_shipped_config_template() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         plugin_dir = Path(tmp)
         (plugin_dir / "config.toml").write_text(
-            '[plugin]\nenabled = true\nconfig_version = "1.3.0"\n',
+            '[plugin]\nenabled = true\nconfig_version = "1.4.0"\n',
             encoding="utf-8",
         )
         shutil.copy2(template_src, plugin_dir / plastic_plugin.SHIPPED_CONFIG_TEMPLATE_NAME)
@@ -135,7 +135,7 @@ def test_runner_save_path_preserves_content() -> None:
             existing_document[key] = tomlkit.item(value)
     dumped = tomlkit.dumps(existing_document)
     assert "size_limit = 8192" in dumped
-    assert 'config_version = "1.3.0"' in dumped
+    assert 'config_version = "1.4.0"' in dumped
     print("ok: runner merge path keeps memory fields and comments")
 
 
@@ -154,8 +154,35 @@ def test_resolve_effective_defaults() -> None:
     assert eff.size_limit == 8192
     assert eff.note_file == "my_memory.md"
     assert eff.hook_timeout_ms == 60000
+    assert eff.compact_model == "replyer"
+    assert eff.rewrite_model == "replyer"
+    assert eff.llm_rewrite_writes is True
+    assert eff.max_rewrite_attempts == 3
     assert eff.injection_template == plastic_plugin.DEFAULT_INJECTION_TEMPLATE
     print("ok: resolve effective defaults")
+
+
+def test_legacy_compact_model_follows_replyer() -> None:
+    memory = plastic_plugin.MemorySectionConfig(compact_model="planner")
+    eff = plastic_plugin.resolve_effective_memory_config(memory)
+    assert eff.compact_model == "replyer"
+    print("ok: legacy compact_model planner follows replyer")
+
+
+def test_build_rewrite_payload_excludes_scope_and_anchor() -> None:
+    payload = plastic_plugin._build_rewrite_payload(
+        "",
+        {
+            "scope": "global",
+            "insert_after_string": "锚点",
+            "text": "正文",
+            "note": "忽略",
+        },
+    )
+    assert "scope:" not in payload
+    assert "insert_after_string:" not in payload
+    assert "text: 正文" in payload
+    print("ok: rewrite payload excludes structural args")
 
 
 def test_plugin_importable() -> None:
@@ -191,6 +218,7 @@ def test_instruction_write_feedback() -> None:
     import tempfile
 
     p = plastic_plugin.PlasticMemoryPlugin()
+    p._llm_rewrite_writes = False
     tmp = Path(tempfile.mkdtemp(prefix="pm-smoke-"))
     p._global_store = plastic_plugin.NoteStore(tmp / "note.md")
     p._size_limit = 100000
@@ -215,6 +243,8 @@ def main() -> None:
     test_plugin_importable()
     test_instruction_write_feedback()
     test_resolve_effective_defaults()
+    test_legacy_compact_model_follows_replyer()
+    test_build_rewrite_payload_excludes_scope_and_anchor()
     test_legacy_runtime_default_follows_code_not_file()
     test_restore_shipped_config_template()
     test_version_upgrade_preserves_user_fields()
