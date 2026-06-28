@@ -169,6 +169,58 @@ def test_legacy_compact_model_follows_replyer() -> None:
     print("ok: legacy compact_model planner follows replyer")
 
 
+def test_resolve_rewrite_max_tokens_uses_size_limit_multiplier() -> None:
+    assert plastic_plugin._resolve_rewrite_max_tokens(0, 8192) == 8192 * 8
+    assert plastic_plugin._resolve_rewrite_max_tokens(0, 4096) == 4096 * 8
+    assert plastic_plugin._resolve_rewrite_max_tokens(12000, 8192) == 12000
+    print("ok: rewrite max_tokens follows size_limit multiplier")
+
+
+def test_build_rewrite_payload_excludes_host_context() -> None:
+    payload = plastic_plugin._build_rewrite_payload(
+        "正文",
+        {
+            "scope": "global",
+            "insert_after_string": "锚点",
+            "stream_id": "stream-1",
+            "chat_id": "stream-1",
+            "group_id": "g1",
+            "user_id": "u1",
+            "platform": "qq",
+            "reasoning": "思考过程",
+            "action_data": {"k": "v"},
+        },
+    )
+    assert "scope:" not in payload
+    assert "insert_after_string:" not in payload
+    assert "stream_id:" not in payload
+    assert "chat_id:" not in payload
+    assert "group_id:" not in payload
+    assert "content: 正文" in payload
+    print("ok: rewrite payload excludes host context")
+
+
+def test_empty_content_with_host_context_skips_llm() -> None:
+    """无实质正文时，即使 Host 注入 stream_id 等 kwargs 也不得调用 LLM。"""
+    import asyncio
+
+    p = plastic_plugin.PlasticMemoryPlugin()
+    p._llm_rewrite_writes = True
+
+    content, notice = asyncio.run(
+        p._resolve_instruction_content(
+            "rewrite_instruction",
+            "",
+            "全局",
+            8192,
+            {"stream_id": "test-stream", "chat_id": "test-stream"},
+        )
+    )
+    assert content == ""
+    assert notice == ""
+    print("ok: empty content with host context skips llm")
+
+
 def test_build_rewrite_payload_excludes_scope_and_anchor() -> None:
     payload = plastic_plugin._build_rewrite_payload(
         "",
@@ -212,6 +264,69 @@ def test_custom_size_limit_preserved_on_upgrade() -> None:
     print("ok: customized size_limit preserved on upgrade")
 
 
+def test_inject_continues_when_one_scope_read_fails() -> None:
+    """某一作用域读取失败时，仍注入另一作用域已成功读取的内容。"""
+    import asyncio
+    import tempfile
+    from unittest.mock import AsyncMock, MagicMock
+
+    p = plastic_plugin.PlasticMemoryPlugin()
+    tmp = Path(tempfile.mkdtemp(prefix="pm-smoke-"))
+    stream_store = plastic_plugin.NoteStore(tmp / "chat_notes" / "stream-1.md")
+    stream_store.write("聊天流演化指令\n")
+    p._inject_when_empty = False
+    p._size_limit = 8192
+    p._global_store = plastic_plugin.NoteStore(tmp / "global.md")
+
+    class FailingGlobalStore:
+        def read(self) -> str:
+            raise plastic_plugin.NoteStoreReadError("全局读取失败")
+
+    p._global_store = FailingGlobalStore()
+    p._get_chat_store = lambda _stream_id: stream_store
+    p._set_context(
+        MagicMock(
+            config=MagicMock(get=AsyncMock(side_effect=lambda key, default=None: "麦麦")),
+            logger=MagicMock(),
+        )
+    )
+
+    kwargs: dict = {
+        "messages": [{"role": "system", "content": "system prompt"}],
+        "stream_id": "stream-1",
+    }
+    result = asyncio.run(p._inject(kwargs, p._injection_template))
+    assert "modified_kwargs" in result
+    injected = result["modified_kwargs"]["messages"][1]["content"]
+    assert "聊天流演化指令" in injected
+    assert "自我演化接口" in injected
+    print("ok: inject continues with partial read success")
+
+
+def test_compact_restores_when_file_cleared_during_llm() -> None:
+    """压缩期间文件被清空时，应写入 LLM 压缩结果而非静默丢弃。"""
+    import asyncio
+    import tempfile
+    from unittest.mock import MagicMock
+
+    p = plastic_plugin.PlasticMemoryPlugin()
+    tmp = Path(tempfile.mkdtemp(prefix="pm-smoke-"))
+    store = plastic_plugin.NoteStore(tmp / "note.md")
+    store.write("x" * 100)
+    p._set_context(MagicMock(logger=MagicMock()))
+
+    async def fake_compact_and_clear(_content: str, _size_limit: int, _scope_label: str) -> str:
+        store.path.unlink(missing_ok=True)
+        return "compressed\n"
+
+    p._compact_content_with_llm = fake_compact_and_clear
+
+    result_len = asyncio.run(p._compact(store, 50, "全局"))
+    assert store.read() == "compressed\n"
+    assert result_len == len("compressed\n")
+    print("ok: compact restores when file cleared during llm")
+
+
 def test_instruction_write_feedback() -> None:
     """演化指令写入工具：空内容不得静默写入/清空，且容忍 instruction/note/text 别名。"""
     import asyncio
@@ -244,7 +359,12 @@ def main() -> None:
     test_instruction_write_feedback()
     test_resolve_effective_defaults()
     test_legacy_compact_model_follows_replyer()
+    test_resolve_rewrite_max_tokens_uses_size_limit_multiplier()
+    test_build_rewrite_payload_excludes_host_context()
+    test_empty_content_with_host_context_skips_llm()
     test_build_rewrite_payload_excludes_scope_and_anchor()
+    test_inject_continues_when_one_scope_read_fails()
+    test_compact_restores_when_file_cleared_during_llm()
     test_legacy_runtime_default_follows_code_not_file()
     test_restore_shipped_config_template()
     test_version_upgrade_preserves_user_fields()

@@ -160,7 +160,27 @@ DEFAULT_REWRITE_MAX_TOKENS = 0
 DEFAULT_MAX_REWRITE_ATTEMPTS = 3
 
 # 传给 LLM 整理写入内容时排除的结构化参数（非正文）。
-_WRITE_KWARG_EXCLUDE = frozenset({"scope", "insert_after_string"})
+# 含 Host 注入的会话上下文字段（见 MaiBot component_query._build_tool_context_payload）。
+_WRITE_KWARG_EXCLUDE = frozenset(
+    {
+        "scope",
+        "insert_after_string",
+        "stream_id",
+        "session_id",
+        "chat_id",
+        "group_id",
+        "user_id",
+        "platform",
+        "reasoning",
+        "action_data",
+    }
+)
+
+_LLM_REWRITE_FALLBACK_NOTICE = " LLM 整理未成功，已使用原始参数写入。"
+
+
+class NoteStoreReadError(OSError):
+    """演化指令文件读取失败。"""
 
 # config.toml 1.2.0 时代写进文件的默认值。运行时若字段仍等于这些值，视为「未自定义」，
 # 跟随当前代码内置 DEFAULT_*（不改写磁盘上的 config.toml）。
@@ -328,11 +348,12 @@ def _resolve_compact_max_tokens(configured: int, size_limit: int) -> int:
 def _resolve_rewrite_max_tokens(configured: int, size_limit: int) -> int:
     """解析写入整理 LLM 调用的 max_tokens。
 
-    configured 为 0 时取 ``max(4096, size_limit)``。
+    configured 为 0 时自动取 ``size_limit * AUTO_COMPACT_MAX_TOKENS_MULTIPLIER``（与压缩相同，
+    为 reasoning token 与接近 size_limit 的正文输出预留空间）。
     """
     if configured > 0:
         return configured
-    return max(4096, size_limit)
+    return size_limit * AUTO_COMPACT_MAX_TOKENS_MULTIPLIER
 
 
 def _should_retry_compact_output(
@@ -382,13 +403,17 @@ class NoteStore:
         self.lock = asyncio.Lock()
 
     def read(self) -> str:
-        """读取演化指令内容；文件不存在时返回空字符串。"""
+        """读取演化指令内容；文件不存在时返回空字符串。
+
+        Raises:
+            NoteStoreReadError: 文件存在但读取失败（权限、I/O 错误等）。
+        """
         if not self.path.exists():
             return ""
         try:
             return self.path.read_text(encoding="utf-8")
-        except OSError:
-            return ""
+        except OSError as exc:
+            raise NoteStoreReadError(f"读取演化指令失败（{self.path}）: {exc}") from exc
 
     def write(self, content: str) -> None:
         """以 UTF-8 写入（覆盖）演化指令内容。"""
@@ -510,7 +535,7 @@ class MemorySectionConfig(PluginConfigBase):
         json_schema_extra={"placeholder": "true"},
         description=(
             "append_instruction / rewrite_instruction 写入前是否经 LLM 整理 planner 原始工具参数。"
-            "默认开启；关闭时回退为直接合并 content 及 instruction/note/text 等别名。"
+            "默认开启（v0.3.0 起）；关闭时回退为直接合并 content 及 instruction/note/text 等别名。"
         ),
     )
     rewrite_model: str | None = Field(
@@ -526,7 +551,10 @@ class MemorySectionConfig(PluginConfigBase):
     rewrite_max_tokens: int | None = Field(
         default=None,
         json_schema_extra={"placeholder": str(DEFAULT_REWRITE_MAX_TOKENS)},
-        description="写入整理 LLM 调用的最大 token 数；0 表示自动取 max(4096, size_limit)。",
+        description=(
+            "写入整理 LLM 调用的最大 token 数；0 表示自动按对应 size_limit 的八倍计算"
+            "（与 compact_max_tokens 相同，为 reasoning token 预留空间）。"
+        ),
     )
     max_rewrite_attempts: int | None = Field(
         default=None,
@@ -1075,14 +1103,31 @@ class PlasticMemoryPlugin(MaiBotPlugin):
             if not isinstance(messages, list):
                 return {"action": "continue"}
 
-            global_note = self._global_store.read() if self._global_store is not None else ""
+            global_note = ""
+            global_read_failed = False
+            if self._global_store is not None:
+                try:
+                    global_note = self._global_store.read()
+                except NoteStoreReadError as exc:
+                    self.ctx.logger.warning("读取全局演化指令失败，跳过全局区块: %s", exc)
+                    global_read_failed = True
+
             stream_id = _resolve_stream_id(kwargs)
             stream_note = ""
+            stream_read_failed = False
             if stream_id:
-                stream_note = self._get_chat_store(stream_id).read()
+                try:
+                    stream_note = self._get_chat_store(stream_id).read()
+                except NoteStoreReadError as exc:
+                    self.ctx.logger.warning("读取聊天流演化指令失败，跳过聊天流区块: %s", exc)
+                    stream_read_failed = True
 
-            show_global = bool(global_note) or self._inject_when_empty
-            show_stream = bool(stream_id) and (bool(stream_note) or self._inject_when_empty)
+            show_global = (not global_read_failed) and (bool(global_note) or self._inject_when_empty)
+            show_stream = (
+                bool(stream_id)
+                and (not stream_read_failed)
+                and (bool(stream_note) or self._inject_when_empty)
+            )
             if not show_global and not show_stream:
                 return {"action": "continue"}
 
@@ -1131,36 +1176,42 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         tool_name: str,
         content: str,
         scope_label: str,
+        size_limit: int,
         kwargs: dict[str, Any],
-    ) -> tuple[str, Optional[str]]:
+    ) -> tuple[str, str]:
         """解析 append / rewrite 待写入正文。
 
-        开启 ``llm_rewrite_writes`` 时，将除 ``insert_after_string`` 外的工具参数交给 LLM 整理；
-        LLM 多次返回空则回退为 ``_coalesce_text`` 合并结果。
+        返回 ``(正文, 附加说明)``。开启 ``llm_rewrite_writes`` 时，仅在有实质正文
+        （``_coalesce_text`` 非空）时才调用 LLM；失败回退时在附加说明中明示。
         """
         raw_fallback = _coalesce_text(content, kwargs, "instruction", "note", "text", "body", "markdown")
 
+        if not raw_fallback.strip():
+            return "", ""
+
         if not self._llm_rewrite_writes:
-            if not raw_fallback.strip():
-                return "", None
-            return raw_fallback, None
+            return raw_fallback, ""
 
         raw_payload = _build_rewrite_payload(content, kwargs)
         if raw_payload.strip():
-            rewritten = await self._rewrite_write_payload(tool_name, scope_label, raw_payload)
+            rewritten = await self._rewrite_write_payload(tool_name, scope_label, size_limit, raw_payload)
             if rewritten.strip():
-                return rewritten, None
+                return rewritten, ""
 
-        if raw_fallback.strip():
-            return raw_fallback, None
-        return "", None
+        return raw_fallback, _LLM_REWRITE_FALLBACK_NOTICE
 
-    async def _rewrite_write_payload(self, tool_name: str, scope_label: str, raw_payload: str) -> str:
+    async def _rewrite_write_payload(
+        self,
+        tool_name: str,
+        scope_label: str,
+        size_limit: int,
+        raw_payload: str,
+    ) -> str:
         """调用 LLM 整理 planner 原始工具参数为演化指令正文。"""
         nickname = await self.ctx.config.get("bot.nickname", "麦麦") or "麦麦"
         personality = await self.ctx.config.get("personality.personality", "") or ""
         reply_style = await self.ctx.config.get("personality.reply_style", "") or ""
-        max_tokens = _resolve_rewrite_max_tokens(self._rewrite_max_tokens, self._size_limit)
+        max_tokens = _resolve_rewrite_max_tokens(self._rewrite_max_tokens, size_limit)
         prompt = _render(
             self._rewrite_prompt_template,
             nickname=nickname,
@@ -1265,17 +1316,21 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         if error:
             return {"content": error}
 
-        resolved, _ = await self._resolve_instruction_content(
+        resolved, notice = await self._resolve_instruction_content(
             "append_instruction",
             content,
             scope_label,
+            size_limit,
             kwargs,
         )
         if not resolved.strip():
             return {"content": self._empty_write_error("append_instruction", rewrite=False)}
 
         async with store.lock:
-            current = store.read()
+            try:
+                current = store.read()
+            except NoteStoreReadError as exc:
+                return {"content": str(exc)}
             new_content, append_error, inserted_after_anchor = _apply_append_to_note(
                 current,
                 resolved,
@@ -1298,6 +1353,8 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         message = f"{action}。当前 {used} 字符，剩余可用 {free} 字符（上限 {size_limit}）。"
         if over:
             message += " 演化指令已超过上限，已在后台触发自动压缩。"
+        if notice:
+            message += notice
         return {"content": message}
 
     @Tool(
@@ -1327,16 +1384,21 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         if error:
             return {"content": error}
 
-        resolved, _ = await self._resolve_instruction_content(
+        resolved, notice = await self._resolve_instruction_content(
             "rewrite_instruction",
             content,
             scope_label,
+            size_limit,
             kwargs,
         )
         if not resolved.strip():
             return {"content": self._empty_write_error("rewrite_instruction", rewrite=True)}
 
         async with store.lock:
+            try:
+                store.read()
+            except NoteStoreReadError as exc:
+                return {"content": str(exc)}
             new_content = resolved
             if new_content and not new_content.endswith("\n"):
                 new_content += "\n"
@@ -1352,6 +1414,8 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         )
         if over:
             message += " 演化指令已超过上限，已在后台触发自动压缩。"
+        if notice:
+            message += notice
         return {"content": message}
 
     @Tool(
@@ -1370,7 +1434,10 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         if error:
             return {"content": error}
 
-        count = await self._compact(store, size_limit, scope_label)
+        try:
+            count = await self._compact(store, size_limit, scope_label)
+        except NoteStoreReadError as exc:
+            return {"content": str(exc)}
         free = max(0, size_limit - count)
         return {
             "content": (
@@ -1393,6 +1460,8 @@ class PlasticMemoryPlugin(MaiBotPlugin):
             await self._compact(store, size_limit, scope_label)
         except asyncio.CancelledError:
             raise
+        except NoteStoreReadError as exc:
+            self.ctx.logger.warning("%s演化指令读取失败，后台压缩已跳过: %s", scope_label, exc)
         except Exception as exc:
             self.ctx.logger.warning("%s演化指令后台压缩失败: %s", scope_label, exc, exc_info=True)
 
@@ -1449,82 +1518,109 @@ class PlasticMemoryPlugin(MaiBotPlugin):
 
         return result
 
+    async def _compact_content_with_llm(self, content: str, size_limit: int, scope_label: str) -> str:
+        """在锁外对快照内容执行 LLM 压缩，返回压缩结果（不写入存储）。"""
+        nickname = await self.ctx.config.get("bot.nickname", "麦麦") or "麦麦"
+        personality = await self.ctx.config.get("personality.personality", "") or ""
+        reply_style = await self.ctx.config.get("personality.reply_style", "") or ""
+
+        max_tokens = _resolve_compact_max_tokens(self._compact_max_tokens, size_limit)
+        if self._compact_max_tokens > 0 and max_tokens < size_limit:
+            self.ctx.logger.warning(
+                "%s演化指令压缩 max_tokens(%d) 小于 size_limit(%d)，可能无法压缩到目标长度",
+                scope_label,
+                max_tokens,
+                size_limit,
+            )
+
+        best = content
+        working = content
+        for attempt in range(1, self._max_compact_attempts + 1):
+            prompt = _render(
+                self._compact_prompt_template,
+                nickname=nickname,
+                personality=personality,
+                reply_style=reply_style,
+                note_scope=scope_label,
+                size_limit=size_limit,
+                used=len(working),
+                note=working,
+            )
+            result = await self._generate_compact_llm(prompt, max_tokens, size_limit)
+            if not result.get("success"):
+                self.ctx.logger.warning(
+                    "%s演化指令压缩第 %d 次 LLM 调用失败: %s",
+                    scope_label,
+                    attempt,
+                    result.get("error") or result.get("response") or "未知错误",
+                )
+                break
+
+            new_content = _extract_compact_response(result)
+            if not new_content:
+                self.ctx.logger.warning(
+                    "%s演化指令压缩第 %d 次返回空内容，停止压缩",
+                    scope_label,
+                    attempt,
+                )
+                break
+
+            if len(new_content) < len(best):
+                best = new_content
+            working = new_content
+
+            if len(new_content) <= size_limit:
+                break
+
+            self.ctx.logger.info(
+                "%s演化指令压缩第 %d 次仍超限（%d > %d），继续压缩",
+                scope_label,
+                attempt,
+                len(new_content),
+                size_limit,
+            )
+
+        if best and not best.endswith("\n"):
+            best += "\n"
+        return best
+
     async def _compact(self, store: NoteStore, size_limit: int, scope_label: str) -> int:
         """对演化指令执行一次（可能递归的）LLM 压缩，返回压缩后的字符数。"""
         async with store.lock:
-            content = store.read()
-            if len(content) <= size_limit:
-                return len(content)
+            snapshot = store.read()
+            if len(snapshot) <= size_limit:
+                return len(snapshot)
 
-            nickname = await self.ctx.config.get("bot.nickname", "麦麦") or "麦麦"
-            personality = await self.ctx.config.get("personality.personality", "") or ""
-            reply_style = await self.ctx.config.get("personality.reply_style", "") or ""
+        best = await self._compact_content_with_llm(snapshot, size_limit, scope_label)
 
-            max_tokens = _resolve_compact_max_tokens(self._compact_max_tokens, size_limit)
-            if self._compact_max_tokens > 0 and max_tokens < size_limit:
-                self.ctx.logger.warning(
-                    "%s演化指令压缩 max_tokens(%d) 小于 size_limit(%d)，可能无法压缩到目标长度",
-                    scope_label,
-                    max_tokens,
-                    size_limit,
-                )
+        async with store.lock:
+            current = store.read()
 
-            best = content
-            for attempt in range(1, self._max_compact_attempts + 1):
-                prompt = _render(
-                    self._compact_prompt_template,
-                    nickname=nickname,
-                    personality=personality,
-                    reply_style=reply_style,
-                    note_scope=scope_label,
-                    size_limit=size_limit,
-                    used=len(content),
-                    note=content,
-                )
-                result = await self._generate_compact_llm(prompt, max_tokens, size_limit)
-                if not result.get("success"):
-                    self.ctx.logger.warning(
-                        "%s演化指令压缩第 %d 次 LLM 调用失败: %s",
-                        scope_label,
-                        attempt,
-                        result.get("error") or result.get("response") or "未知错误",
-                    )
-                    break
-
-                new_content = _extract_compact_response(result)
-                if not new_content:
-                    self.ctx.logger.warning(
-                        "%s演化指令压缩第 %d 次返回空内容，停止压缩",
-                        scope_label,
-                        attempt,
-                    )
-                    break
-
-                if len(new_content) < len(best):
-                    best = new_content
-                content = new_content
-
-                if len(new_content) <= size_limit:
-                    break
-
+            if current == snapshot:
+                store.write(best)
                 self.ctx.logger.info(
-                    "%s演化指令压缩第 %d 次仍超限（%d > %d），继续压缩",
+                    "%s演化指令压缩完成，当前 %d 字符（上限 %d）",
                     scope_label,
-                    attempt,
-                    len(new_content),
+                    len(best),
                     size_limit,
                 )
+                return len(best)
 
-            if best and not best.endswith("\n"):
-                best += "\n"
-            store.write(best)
+            if not current.strip() and snapshot.strip():
+                self.ctx.logger.warning(
+                    "%s演化指令在压缩期间被清空或删除，写入压缩结果",
+                    scope_label,
+                )
+                store.write(best)
+                return len(best)
+
             self.ctx.logger.info(
-                "%s演化指令压缩完成，当前 %d 字符（上限 %d）",
+                "%s演化指令在压缩期间被修改，跳过本次压缩写入",
                 scope_label,
-                len(best),
-                size_limit,
             )
-            return len(best)
+            if len(current) > size_limit:
+                self._schedule_compact(store, size_limit, scope_label)
+            return len(current)
 
 
 def create_plugin() -> PlasticMemoryPlugin:

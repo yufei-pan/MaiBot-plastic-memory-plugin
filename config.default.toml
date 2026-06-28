@@ -35,13 +35,14 @@ config_version = "1.4.0"
 # 若返回演化指令少于 size_limit 的 80%，视为可能被截断，会临时将 max_tokens 翻倍并重试（最多 3 次）；
 # 多次调用后会选用最长的那次响应。
 # compact_max_tokens = 0
-# append_instruction / rewrite_instruction 写入前是否经 LLM 整理 planner 原始工具参数（默认开启）。
+# append_instruction / rewrite_instruction 写入前是否经 LLM 整理 planner 原始工具参数（默认开启；v0.3.0 起，若需原样落盘请设为 false）。
 # llm_rewrite_writes = true
 # 写入整理时使用的 LLM 模型任务名；默认使用 replyer 任务的模型。
 # rewrite_model = "replyer"
 # 写入整理时的采样温度。
 # rewrite_temperature = 0.3
-# 写入整理 LLM 调用的最大 token 数；0 表示自动取 max(4096, size_limit)。
+# 写入整理 LLM 调用的最大 token 数；0 表示自动按对应 size_limit 的八倍计算
+# （与 compact_max_tokens 相同，为 reasoning token 预留空间）。
 # rewrite_max_tokens = 0
 # 写入整理 LLM 返回空内容时的最大重试次数；仍失败则回退为原始参数合并结果。
 # max_rewrite_attempts = 3
