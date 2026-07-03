@@ -71,7 +71,7 @@ def test_restore_shipped_config_template() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         plugin_dir = Path(tmp)
         (plugin_dir / "config.toml").write_text(
-            '[plugin]\nenabled = true\nconfig_version = "1.4.0"\n',
+            '[plugin]\nenabled = true\nconfig_version = "1.5.0"\n',
             encoding="utf-8",
         )
         shutil.copy2(template_src, plugin_dir / plastic_plugin.SHIPPED_CONFIG_TEMPLATE_NAME)
@@ -135,7 +135,7 @@ def test_runner_save_path_preserves_content() -> None:
             existing_document[key] = tomlkit.item(value)
     dumped = tomlkit.dumps(existing_document)
     assert "size_limit = 8192" in dumped
-    assert 'config_version = "1.4.0"' in dumped
+    assert 'config_version = "1.5.0"' in dumped
     print("ok: runner merge path keeps memory fields and comments")
 
 
@@ -232,6 +232,22 @@ def test_default_prompt_templates_recommend_markdown() -> None:
     print("ok: default prompt templates recommend markdown")
 
 
+def test_verbose_injection_templates_follow_new_default() -> None:
+    """旧的冗长演化接口默认模板应自动跟随新的简洁自我回馈记录默认。"""
+    memory = plastic_plugin.MemorySectionConfig(
+        injection_template=plastic_plugin._LEGACY_INJECTION_TEMPLATE_VERBOSE,
+        replyer_injection_template=plastic_plugin._LEGACY_REPLYER_INJECTION_TEMPLATE_VERBOSE,
+        stream_injection_section=plastic_plugin._LEGACY_STREAM_INJECTION_SECTION_EVOLUTION,
+    )
+    eff = plastic_plugin.resolve_effective_memory_config(memory)
+    assert eff.injection_template == plastic_plugin.DEFAULT_INJECTION_TEMPLATE
+    assert eff.replyer_injection_template == plastic_plugin.DEFAULT_REPLYER_INJECTION_TEMPLATE
+    assert eff.stream_injection_section == plastic_plugin.DEFAULT_STREAM_INJECTION_SECTION
+    assert "自我回馈全局记录" in eff.injection_template
+    assert "从执行层跃迁" not in eff.injection_template
+    print("ok: verbose injection templates follow new concise default")
+
+
 def test_build_rewrite_payload_excludes_scope_and_anchor() -> None:
     payload = plastic_plugin._build_rewrite_payload(
         "",
@@ -310,7 +326,7 @@ def test_inject_continues_when_one_scope_read_fails() -> None:
     assert "modified_kwargs" in result
     injected = result["modified_kwargs"]["messages"][1]["content"]
     assert "聊天流演化指令" in injected
-    assert "自我演化接口" in injected
+    assert "自我回馈本聊天流记录" in injected
     print("ok: inject continues with partial read success")
 
 
@@ -375,6 +391,7 @@ def main() -> None:
     test_empty_content_with_host_context_skips_llm()
     test_prepare_instruction_write_schedules_async_notice()
     test_default_prompt_templates_recommend_markdown()
+    test_verbose_injection_templates_follow_new_default()
     test_build_rewrite_payload_excludes_scope_and_anchor()
     test_inject_continues_when_one_scope_read_fails()
     test_compact_restores_when_file_cleared_during_llm()

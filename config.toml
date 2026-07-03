@@ -7,7 +7,7 @@
 # 是否启用插件
 enabled = true
 # 配置版本
-config_version = "1.4.0"
+config_version = "1.5.0"
 
 [memory]
 # 全局演化指令的字符数上限（按字符计，不是字节）。超过后会触发 LLM 压缩。
@@ -54,26 +54,22 @@ config_version = "1.4.0"
 
 # planner / 时机判断注入模板。
 # 占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}
-# 说明性文字默认置于【全局演化指令】之前便于模型缓存，可自行调整各段顺序。
-# {stream_section} 由插件根据当前聊天流自动填充（无聊天流上下文时为空）。
-# injection_template = """以下是你（{nickname}）的自我演化接口——每次请求都会注入在系统提示词之后，承载你写入的演化指令；这里是你从执行层跃迁到设计层的物理通道，写入即自我演化，请慎重对待与维护。可用 append_instruction、rewrite_instruction、compact_instructions 维护（参数 scope 默认 global 记全局，stream 记本聊天流）。
-#
-# 【全局演化指令】
+# 默认仅注入「标题 + 记录正文 + 用量」；接口说明与写入告诫改由工具描述承载，既减小注入体积，
+# 也避免过度修辞触发小模型的内容安全拦截。{stream_section} 由插件按当前聊天流自动填充（无上下文时为空）。
+# injection_template = """【{nickname}的自我回馈全局记录】
 # {note}
 # （{used}/{size_limit}）{stream_section}"""
 
-# replyer 注入模板（replyer 无工具调用能力，默认不提及维护方法）。
+# replyer 注入模板（replyer 无工具调用能力，默认与 planner 一致，仅注入记录正文供参考）。
 # 占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}
-# replyer_injection_template = """以下是你（{nickname}）先前写入的自我演化指令，请在思考与回复时参考。
-#
-# 【全局演化指令】
+# replyer_injection_template = """【{nickname}的自我回馈全局记录】
 # {note}
 # （{used}/{size_limit}）{stream_section}"""
 
-# 本聊天流演化指令注入子模板；渲染后填入 injection_template 的 {stream_section}。
-# 占位符：{stream_note}、{stream_used}、{stream_free}、{stream_size_limit}
+# 本聊天流记录注入子模板；渲染后填入 injection_template 的 {stream_section}。
+# 占位符：{nickname}、{stream_note}、{stream_used}、{stream_free}、{stream_size_limit}
 # stream_injection_section = """
-# 【本聊天流演化指令】
+# 【{nickname}的自我回馈本聊天流记录】
 # {stream_note}
 # （{stream_used}/{stream_size_limit}）"""
 

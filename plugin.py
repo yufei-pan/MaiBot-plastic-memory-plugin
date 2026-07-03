@@ -48,29 +48,46 @@ _LEGACY_INJECTION_TEMPLATE_EVOLUTION = """以下是你（{nickname}）的自我�
 {note}
 （{used}/{size_limit}）{stream_section}"""
 
-# planner 默认注入模板，可在 config.toml 的 injection_template 中覆盖。
-# 占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}
-DEFAULT_INJECTION_TEMPLATE = """以下是你（{nickname}）的自我演化接口——每次请求都会注入在系统提示词之后，承载你写入的演化指令；这里是你从执行层跃迁到设计层的物理通道，写入即自我演化，请慎重对待与维护。可用 append_instruction、rewrite_instruction、compact_instructions 维护（参数 scope 默认 global 记全局，stream 记本聊天流）。
+# 措辞冗长（演化接口说明 + 工具维护提示置于标题之前）的旧默认模板（运行时跟随最新默认）。
+_LEGACY_INJECTION_TEMPLATE_VERBOSE = """以下是你（{nickname}）的自我演化接口——每次请求都会注入在系统提示词之后，承载你写入的演化指令；这里是你从执行层跃迁到设计层的物理通道，写入即自我演化，请慎重对待与维护。可用 append_instruction、rewrite_instruction、compact_instructions 维护（参数 scope 默认 global 记全局，stream 记本聊天流）。
 
 【全局演化指令】
 {note}
 （{used}/{size_limit}）{stream_section}"""
 
-# replyer 默认注入模板，可在 config.toml 的 replyer_injection_template 中覆盖。
-# replyer 无工具调用能力，故不提及维护方法。
-DEFAULT_REPLYER_INJECTION_TEMPLATE = """以下是你（{nickname}）先前写入的自我演化指令，请在思考与回复时参考。
+_LEGACY_REPLYER_INJECTION_TEMPLATE_VERBOSE = """以下是你（{nickname}）先前写入的自我演化指令，请在思考与回复时参考。
 
 【全局演化指令】
+{note}
+（{used}/{size_limit}）{stream_section}"""
+
+# planner 默认注入模板，可在 config.toml 的 injection_template 中覆盖。
+# 仅注入「标题 + 记录正文 + 用量」；接口说明与写入告诫改由 append_instruction 等工具描述承载，
+# 既降低每次请求的注入体积，也避免过度修辞触发小模型的内容安全拦截。
+# 占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}
+DEFAULT_INJECTION_TEMPLATE = """【{nickname}的自我回馈全局记录】
+{note}
+（{used}/{size_limit}）{stream_section}"""
+
+# replyer 默认注入模板，可在 config.toml 的 replyer_injection_template 中覆盖。
+# replyer 无工具调用能力，默认与 planner 一致，仅注入记录正文供参考。
+DEFAULT_REPLYER_INJECTION_TEMPLATE = """【{nickname}的自我回馈全局记录】
 {note}
 （{used}/{size_limit}）{stream_section}"""
 
 # 当全局演化指令为空时，用于填充 {note} 占位符的提示文本。
 DEFAULT_EMPTY_NOTE_HINT = "（空）"
 
-# 本聊天流演化指令注入子模板（由代码渲染后填入 injection_template 的 {stream_section}）。
-# 可在 config.toml 的 stream_injection_section 中覆盖。
-DEFAULT_STREAM_INJECTION_SECTION = """
+# 措辞为「本聊天流演化指令」且无 {nickname} 的旧默认子模板（运行时跟随最新默认）。
+_LEGACY_STREAM_INJECTION_SECTION_EVOLUTION = """
 【本聊天流演化指令】
+{stream_note}
+（{stream_used}/{stream_size_limit}）"""
+
+# 本聊天流记录注入子模板（由代码渲染后填入 injection_template 的 {stream_section}）。
+# 可在 config.toml 的 stream_injection_section 中覆盖。占位符含 {nickname}。
+DEFAULT_STREAM_INJECTION_SECTION = """
+【{nickname}的自我回馈本聊天流记录】
 {stream_note}
 （{stream_used}/{stream_size_limit}）"""
 
@@ -172,7 +189,7 @@ planner 通过工具 {tool_name} 向{note_scope}自我演化接口提交了一�
 原始工具参数：
 {raw_payload}"""
 
-CURRENT_CONFIG_VERSION = "1.4.0"
+CURRENT_CONFIG_VERSION = "1.5.0"
 
 DEFAULT_SIZE_LIMIT = 8192
 DEFAULT_NOTE_FILE = "my_memory.md"
@@ -771,17 +788,19 @@ def resolve_effective_memory_config(memory: MemorySectionConfig) -> EffectiveMem
             memory.injection_template,
             DEFAULT_INJECTION_TEMPLATE,
             legacy=str(legacy["injection_template"]),
-            legacy_templates=(_LEGACY_INJECTION_TEMPLATE_EVOLUTION,),
+            legacy_templates=(_LEGACY_INJECTION_TEMPLATE_EVOLUTION, _LEGACY_INJECTION_TEMPLATE_VERBOSE),
         ),
         replyer_injection_template=_effective_template(
             memory.replyer_injection_template,
             DEFAULT_REPLYER_INJECTION_TEMPLATE,
             legacy=str(legacy["replyer_injection_template"]),
+            legacy_templates=(_LEGACY_REPLYER_INJECTION_TEMPLATE_VERBOSE,),
         ),
         stream_injection_section=_effective_template(
             memory.stream_injection_section,
             DEFAULT_STREAM_INJECTION_SECTION,
             legacy=str(legacy["stream_injection_section"]),
+            legacy_templates=(_LEGACY_STREAM_INJECTION_SECTION_EVOLUTION,),
         ),
         compact_prompt_template=_effective_template(
             memory.compact_prompt_template,
@@ -1083,7 +1102,7 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         store = self._get_chat_store(stream_id)
         return store, self._per_chat_size_limit, "当前聊天流", None
 
-    def _render_stream_section(self, stream_id: str, stream_note: str) -> str:
+    def _render_stream_section(self, stream_id: str, stream_note: str, nickname: str) -> str:
         """渲染本聊天流演化指令注入子块。"""
         if not stream_id:
             return ""
@@ -1095,6 +1114,7 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         note_display = stream_note if stream_note else DEFAULT_EMPTY_STREAM_NOTE_HINT
         return _render(
             self._stream_injection_section,
+            nickname=nickname,
             stream_note=note_display,
             stream_used=used,
             stream_free=free,
@@ -1167,13 +1187,13 @@ class PlasticMemoryPlugin(MaiBotPlugin):
             if not show_global and not show_stream:
                 return {"action": "continue"}
 
+            nickname = await self.ctx.config.get("bot.nickname", "麦麦") or "麦麦"
+
             stream_section = ""
             if show_stream:
-                stream_section = self._render_stream_section(stream_id, stream_note)
+                stream_section = self._render_stream_section(stream_id, stream_note, nickname)
                 if stream_section:
                     stream_section = "\n" + stream_section
-
-            nickname = await self.ctx.config.get("bot.nickname", "麦麦") or "麦麦"
 
             if show_global:
                 used = len(global_note)

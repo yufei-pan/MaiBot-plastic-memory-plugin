@@ -108,9 +108,9 @@ inject_to_planner = true
 inject_to_replyer = true
 hook_timeout_ms = 60000
 # 占位符：{nickname} {note} {used} {free} {size_limit} {stream_section}
-# injection_template = """..."""          # planner / 时机判断
-# replyer_injection_template = """..."""  # replyer（默认不提维护工具）
-# 占位符：{stream_note} {stream_used} {stream_free} {stream_size_limit}
+# injection_template = """..."""          # planner / 时机判断（默认仅标题 + 记录 + 用量）
+# replyer_injection_template = """..."""  # replyer（默认与 planner 一致）
+# 占位符：{nickname} {stream_note} {stream_used} {stream_free} {stream_size_limit}
 # stream_injection_section = """..."""
 
 # ── 压缩 ──
@@ -141,9 +141,9 @@ max_rewrite_attempts = 3
 **`inject_when_empty`** — 演化指令为空时是否仍注入提示（让麦麦知道可以向接口写入指令）。默认 `true`  
 **`inject_to_planner`** / **`inject_to_replyer`** — 是否在 planner / 时机判断 / replyer 中注入。默认均为 `true`  
 **`hook_timeout_ms`** — 注入 Hook 处理器超时（毫秒）。默认 `60000`（**不是**压缩 LLM 的超时）  
-**`injection_template`** — planner / 时机判断注入模板；含自我演化接口维护工具说明。默认把含 `{nickname}` 的说明放在【全局演化指令】之前，便于模型缓存  
-**`replyer_injection_template`** — replyer 专用注入模板；默认仅提示参考先前写入的演化指令，不提及维护工具或自我演化接口定位（replyer 无工具调用能力）  
-**`stream_injection_section`** — 本聊天流演化指令子模板，渲染后填入 `{stream_section}`
+**`injection_template`** — planner / 时机判断注入模板；默认仅注入「`【{nickname}的自我回馈全局记录】` + 记录正文 + 用量」。接口说明与写入告诫改由 `append_instruction` 等工具描述承载，既减小每次请求的注入体积，也避免过度修辞触发小模型的内容安全拦截  
+**`replyer_injection_template`** — replyer 专用注入模板；replyer 无工具调用能力，默认与 planner 一致，仅注入记录正文供参考  
+**`stream_injection_section`** — 本聊天流记录子模板，渲染后填入 `{stream_section}`；占位符含 `{nickname}`
 
 模板字符串较长，完整默认值见仓库内 `config.default.toml`。
 
