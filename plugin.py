@@ -16,11 +16,13 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Optional, Set
+from types import UnionType
+from typing import Any, Literal, Optional, Set, Union, get_args, get_origin
 
 from maibot_sdk import Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.config import validate_plugin_config
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder, ToolParameterInfo, ToolParamType
+from pydantic import model_validator
 
 
 # 1.3.0 及更早版本的内置注入模板（用于识别「仍为旧默认」的配置，运行时跟随新默认）。
@@ -647,6 +649,31 @@ class MemorySectionConfig(PluginConfigBase):
         ),
         json_schema_extra={"placeholder": DEFAULT_REWRITE_PROMPT_TEMPLATE},
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_webui_blank_optionals(cls, data: Any) -> Any:
+        """WebUI 清空 Optional 字段会提交空字符串；转为 None 以便跟随内置默认。"""
+        if not isinstance(data, Mapping):
+            return data
+        cleaned = dict(data)
+        for name, field_info in cls.model_fields.items():
+            if name not in cleaned:
+                continue
+            value = cleaned[name]
+            if not isinstance(value, str) or value.strip():
+                continue
+            if _annotation_allows_none(field_info.annotation):
+                cleaned[name] = None
+        return cleaned
+
+
+def _annotation_allows_none(annotation: Any) -> bool:
+    """判断类型注解是否允许 ``None``（如 ``int | None``）。"""
+    origin = get_origin(annotation)
+    if origin is Union or origin is UnionType:
+        return type(None) in get_args(annotation)
+    return annotation is type(None)
 
 
 class PluginSectionConfig(PluginConfigBase):

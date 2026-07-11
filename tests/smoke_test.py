@@ -148,6 +148,39 @@ def test_none_values_never_persisted() -> None:
     print("ok: empty input normalizes without None for persist")
 
 
+def test_webui_blank_optional_scalars_normalize() -> None:
+    """WebUI 清空 Optional 数值字段会提交空字符串，应视为留空跟随内置默认。"""
+    inst = plastic_plugin.create_plugin()
+    normalized, _ = inst.normalize_plugin_config(
+        {
+            "plugin": {"enabled": True, "config_version": "1.5.0"},
+            "memory": {
+                "per_chat_size_limit": "",
+                "size_limit": "  ",
+                "compact_temperature": "",
+                "inject_when_empty": "",
+            },
+        }
+    )
+    memory = normalized["memory"]
+    assert "per_chat_size_limit" not in memory
+    assert "size_limit" not in memory
+    assert "compact_temperature" not in memory
+    assert "inject_when_empty" not in memory
+    assert all(value is not None for value in _flatten_values(normalized))
+    tomlkit.dumps(normalized)
+
+    # 数字字符串仍应正确解析
+    filled, _ = inst.normalize_plugin_config(
+        {
+            "plugin": {"enabled": True, "config_version": "1.5.0"},
+            "memory": {"per_chat_size_limit": "2048"},
+        }
+    )
+    assert filled["memory"]["per_chat_size_limit"] == 2048
+    print("ok: webui blank optional scalars normalize to defaults")
+
+
 def test_resolve_effective_defaults() -> None:
     cfg = plastic_plugin.PlasticMemoryConfig()
     eff = plastic_plugin.resolve_effective_memory_config(cfg.memory)
@@ -400,6 +433,7 @@ def main() -> None:
     test_version_upgrade_preserves_user_fields()
     test_runner_save_path_preserves_content()
     test_none_values_never_persisted()
+    test_webui_blank_optional_scalars_normalize()
     test_custom_size_limit_preserved_on_upgrade()
     print("\n全部冒烟测试通过")
 
