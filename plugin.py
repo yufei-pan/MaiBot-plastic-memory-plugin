@@ -139,9 +139,22 @@ _LEGACY_COMPACT_PROMPT_TEMPLATE = """你是{nickname}。
 当前笔记内容：
 {note}"""
 
-DEFAULT_COMPACT_PROMPT_TEMPLATE = """你是{nickname}。
+# v0.4.0 及更早内置的压缩模板（「你是{nickname}」身份开场，无模块身份框定）。
+_LEGACY_COMPACT_PROMPT_TEMPLATE_V040 = """你是{nickname}。
 你的人格设定：{personality}
 你的表达风格：{reply_style}
+
+下面这份{note_scope}演化指令太长了：当前 {used} 字符，必须压缩到 {size_limit} 字符以内。
+请你以{nickname}的身份重写这份演化指令，在尽量保留关键信息、待办事项与重要事实的前提下让它更精炼。
+演化指令文件为 Markdown 格式；请用更精炼的 Markdown 重写，尽量保留标题层级、列表等结构。
+只输出压缩后的演化指令正文本身，不要输出任何解释、前言、代码块包裹或额外说明。
+
+当前演化指令内容：
+{note}"""
+
+DEFAULT_COMPACT_PROMPT_TEMPLATE = """你是可塑性记忆模块，是名为「{nickname}」的人工智能生命体的一部分。
+{nickname}的人格设定：{personality}
+{nickname}的表达风格：{reply_style}
 
 下面这份{note_scope}演化指令太长了：当前 {used} 字符，必须压缩到 {size_limit} 字符以内。
 请你以{nickname}的身份重写这份演化指令，在尽量保留关键信息、待办事项与重要事实的前提下让它更精炼。
@@ -177,9 +190,22 @@ planner 通过工具 {tool_name} 向{note_scope}自我演化接口提交了一�
 
 # 写入演化指令前，用 LLM 整理 planner 原始工具参数的提示词模板。
 # 占位符：{nickname}、{personality}、{reply_style}、{tool_name}、{note_scope}、{raw_payload}
-DEFAULT_REWRITE_PROMPT_TEMPLATE = """你是{nickname}。
+# v0.4.0 及更早内置的写入整理模板（「你是{nickname}」身份开场，无模块身份框定）。
+_LEGACY_REWRITE_PROMPT_TEMPLATE_V040 = """你是{nickname}。
 你的人格设定：{personality}
 你的表达风格：{reply_style}
+
+planner 通过工具 {tool_name} 向{note_scope}自我演化接口提交了一份待写入的演化指令草稿，但参数名可能不规范或混有说明性文字。
+请整理为可直接持久化的演化指令正文：保留全部实质信息，用第一人称、符合你的人格与表达风格，语气自然简洁。
+演化指令文件为 Markdown 格式，请用 Markdown 组织结构（如标题、列表、加粗等），但不要只用 ``` 代码块包裹整篇正文。
+只输出演化指令正文本身，不要输出任何解释、前言或额外说明。
+
+原始工具参数：
+{raw_payload}"""
+
+DEFAULT_REWRITE_PROMPT_TEMPLATE = """你是可塑性记忆模块，是名为「{nickname}」的人工智能生命体的一部分。
+{nickname}的人格设定：{personality}
+{nickname}的表达风格：{reply_style}
 
 planner 通过工具 {tool_name} 向{note_scope}自我演化接口提交了一份待写入的演化指令草稿，但参数名可能不规范或混有说明性文字。
 请整理为可直接持久化的演化指令正文：保留全部实质信息，用第一人称、符合你的人格与表达风格，语气自然简洁。
@@ -806,7 +832,10 @@ def resolve_effective_memory_config(memory: MemorySectionConfig) -> EffectiveMem
             memory.compact_prompt_template,
             DEFAULT_COMPACT_PROMPT_TEMPLATE,
             legacy=str(legacy["compact_prompt_template"]),
-            legacy_templates=(_LEGACY_COMPACT_PROMPT_TEMPLATE_V032,),
+            legacy_templates=(
+                _LEGACY_COMPACT_PROMPT_TEMPLATE_V032,
+                _LEGACY_COMPACT_PROMPT_TEMPLATE_V040,
+            ),
         ),
         llm_rewrite_writes=_effective_bool(
             memory.llm_rewrite_writes,
@@ -837,6 +866,7 @@ def resolve_effective_memory_config(memory: MemorySectionConfig) -> EffectiveMem
             memory.rewrite_prompt_template,
             DEFAULT_REWRITE_PROMPT_TEMPLATE,
             legacy=str(legacy["rewrite_prompt_template"]),
+            legacy_templates=(_LEGACY_REWRITE_PROMPT_TEMPLATE_V040,),
         ),
     )
 
