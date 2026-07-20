@@ -5,6 +5,12 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.4.3] - 2026-07-20
+
+### 新增
+
+- `[memory] llm_rpc_timeout_ms`：后台 `llm.generate`（rewrite / compact）的 cap.call RPC 超时（毫秒），默认 120000；实际取 `max(本值, hook_timeout_ms)`；compact 此前未传超时会命中 Host 30s 默认；`config_version` 升至 1.6.0
+
 ## [0.4.2] - 2026-07-11
 
 ### 修复

@@ -140,15 +140,13 @@ max_rewrite_attempts = 3
 
 **`inject_when_empty`** — 演化指令为空时是否仍注入提示（让麦麦知道可以向接口写入指令）。默认 `true`  
 **`inject_to_planner`** / **`inject_to_replyer`** — 是否在 planner / 时机判断 / replyer 中注入。默认均为 `true`  
-**`hook_timeout_ms`** — 注入 Hook 处理器超时（毫秒）。默认 `60000`（**不是**压缩 LLM 的超时）  
+**`hook_timeout_ms`** — 注入 Hook 处理器超时（毫秒）。默认 `60000`  
+**`llm_rpc_timeout_ms`** — 后台 `llm.generate`（rewrite / compact）的 cap.call RPC 超时（毫秒）。实际取 `max(llm_rpc_timeout_ms, hook_timeout_ms)`；默认 `120000`（120 秒）  
 **`injection_template`** — planner / 时机判断注入模板；默认仅注入「`【{nickname}的自我回馈全局记录】` + 记录正文 + 用量」。接口说明与写入告诫改由 `append_instruction` 等工具描述承载，既减小每次请求的注入体积，也避免过度修辞触发小模型的内容安全拦截  
 **`replyer_injection_template`** — replyer 专用注入模板；replyer 无工具调用能力，默认与 planner 一致，仅注入记录正文供参考  
 **`stream_injection_section`** — 本聊天流记录子模板，渲染后填入 `{stream_section}`；占位符含 `{nickname}`
 
 模板字符串较长，完整默认值见仓库内 `config.default.toml`。
-
-> [!NOTE]
-> 当前 `ctx.llm.generate` 未暴露单次 LLM 超时参数，插件无法单独配置压缩调用的超时。
 
 #### 压缩
 

@@ -135,7 +135,7 @@ def test_runner_save_path_preserves_content() -> None:
             existing_document[key] = tomlkit.item(value)
     dumped = tomlkit.dumps(existing_document)
     assert "size_limit = 8192" in dumped
-    assert 'config_version = "1.5.0"' in dumped
+    assert 'config_version = "1.6.0"' in dumped
     print("ok: runner merge path keeps memory fields and comments")
 
 
@@ -187,6 +187,7 @@ def test_resolve_effective_defaults() -> None:
     assert eff.size_limit == 8192
     assert eff.note_file == "my_memory.md"
     assert eff.hook_timeout_ms == 60000
+    assert eff.llm_rpc_timeout_ms == 120000
     assert eff.compact_model == "replyer"
     assert eff.rewrite_model == "replyer"
     assert eff.llm_rewrite_writes is True

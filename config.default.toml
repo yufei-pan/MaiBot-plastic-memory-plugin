@@ -7,7 +7,7 @@
 # 是否启用插件
 enabled = true
 # 配置版本
-config_version = "1.5.0"
+config_version = "1.6.0"
 
 [memory]
 # 全局演化指令的字符数上限（按字符计，不是字节）。超过后会触发 LLM 压缩。
@@ -51,6 +51,9 @@ config_version = "1.5.0"
 # rewrite_prompt_template = """..."""
 # 注入 Hook 处理器的超时时间（毫秒），默认 60000（60 秒）。
 # hook_timeout_ms = 60000
+# 后台 llm.generate（rewrite / compact）的 cap.call RPC 超时（毫秒）。
+# 实际取 max(本值, hook_timeout_ms)；留空默认 120000（120 秒）。Host 未指定时默认仅 30 秒。
+# llm_rpc_timeout_ms = 120000
 
 # planner / 时机判断注入模板。
 # 占位符：{nickname}、{note}、{used}、{free}、{size_limit}、{stream_section}

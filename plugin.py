@@ -106,8 +106,10 @@ SCOPE_TOOL_PARAM = ToolParameterInfo(
 # HookHandler 处理器的默认超时时间（毫秒）。可通过 config.toml 的 hook_timeout_ms 覆盖。
 DEFAULT_HOOK_TIMEOUT_MS = 60000
 
-# 后台 LLM 整理单次 cap.call 超时（毫秒）；取 max(此值, hook_timeout_ms)。
-DEFAULT_REWRITE_LLM_TIMEOUT_MS = 120000
+# 后台 LLM（rewrite / compact）单次 cap.call 超时（毫秒）；实际取 max(此值, hook_timeout_ms)。
+DEFAULT_LLM_RPC_TIMEOUT_MS = 120000
+# 兼容旧常量名
+DEFAULT_REWRITE_LLM_TIMEOUT_MS = DEFAULT_LLM_RPC_TIMEOUT_MS
 
 # compact_max_tokens = 0 时，自动 max_tokens = size_limit * 此倍数（推理模型会消耗大量 reasoning token）。
 AUTO_COMPACT_MAX_TOKENS_MULTIPLIER = 8
@@ -217,7 +219,7 @@ planner 通过工具 {tool_name} 向{note_scope}自我演化接口提交了一�
 原始工具参数：
 {raw_payload}"""
 
-CURRENT_CONFIG_VERSION = "1.5.0"
+CURRENT_CONFIG_VERSION = "1.6.0"
 
 DEFAULT_SIZE_LIMIT = 8192
 DEFAULT_NOTE_FILE = "my_memory.md"
@@ -271,6 +273,7 @@ _LEGACY_RUNTIME_DEFAULTS: dict[str, int | float | str | bool] = {
     "compact_temperature": DEFAULT_COMPACT_TEMPERATURE,
     "compact_max_tokens": DEFAULT_COMPACT_MAX_TOKENS,
     "hook_timeout_ms": DEFAULT_HOOK_TIMEOUT_MS,
+    "llm_rpc_timeout_ms": DEFAULT_LLM_RPC_TIMEOUT_MS,
     "injection_template": _LEGACY_INJECTION_TEMPLATE,
     "replyer_injection_template": _LEGACY_REPLYER_INJECTION_TEMPLATE,
     "stream_injection_section": _LEGACY_STREAM_INJECTION_SECTION,
@@ -576,6 +579,14 @@ class MemorySectionConfig(PluginConfigBase):
         json_schema_extra={"placeholder": str(DEFAULT_HOOK_TIMEOUT_MS)},
         description="注入 Hook 处理器的超时时间（毫秒），默认 60000（60 秒）。",
     )
+    llm_rpc_timeout_ms: int | None = Field(
+        default=None,
+        json_schema_extra={"placeholder": str(DEFAULT_LLM_RPC_TIMEOUT_MS)},
+        description=(
+            "后台 llm.generate（写入整理 rewrite 与压缩 compact）的 cap.call RPC 超时（毫秒）。"
+            "实际取 max(本值, hook_timeout_ms)；留空默认 120000（120 秒）。Host 未指定时默认仅 30 秒。"
+        ),
+    )
     injection_template: str = Field(
         default="",
         description=(
@@ -715,6 +726,7 @@ class EffectiveMemoryConfig:
     compact_temperature: float
     compact_max_tokens: int
     hook_timeout_ms: int
+    llm_rpc_timeout_ms: int
     injection_template: str
     replyer_injection_template: str
     stream_injection_section: str
@@ -835,6 +847,12 @@ def resolve_effective_memory_config(memory: MemorySectionConfig) -> EffectiveMem
             memory.hook_timeout_ms,
             DEFAULT_HOOK_TIMEOUT_MS,
             legacy=int(legacy["hook_timeout_ms"]),
+            minimum=1,
+        ),
+        llm_rpc_timeout_ms=_effective_int(
+            memory.llm_rpc_timeout_ms,
+            DEFAULT_LLM_RPC_TIMEOUT_MS,
+            legacy=int(legacy["llm_rpc_timeout_ms"]),
             minimum=1,
         ),
         injection_template=_effective_template(
@@ -985,6 +1003,7 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         self._max_rewrite_attempts: int = DEFAULT_MAX_REWRITE_ATTEMPTS
         self._rewrite_prompt_template: str = DEFAULT_REWRITE_PROMPT_TEMPLATE
         self._hook_timeout_ms: int = DEFAULT_HOOK_TIMEOUT_MS
+        self._llm_rpc_timeout_ms: int = DEFAULT_LLM_RPC_TIMEOUT_MS
         self._injection_template: str = DEFAULT_INJECTION_TEMPLATE
         self._replyer_injection_template: str = DEFAULT_REPLYER_INJECTION_TEMPLATE
         self._stream_injection_section: str = DEFAULT_STREAM_INJECTION_SECTION
@@ -1088,6 +1107,7 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         self._compact_temperature = effective.compact_temperature
         self._compact_max_tokens = effective.compact_max_tokens
         self._hook_timeout_ms = effective.hook_timeout_ms
+        self._llm_rpc_timeout_ms = effective.llm_rpc_timeout_ms
         self._injection_template = effective.injection_template
         self._replyer_injection_template = effective.replyer_injection_template
         self._stream_injection_section = effective.stream_injection_section
@@ -1320,7 +1340,7 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         personality = await self.ctx.config.get("personality.personality", "") or ""
         reply_style = await self.ctx.config.get("personality.reply_style", "") or ""
         max_tokens = _resolve_rewrite_max_tokens(self._rewrite_max_tokens, size_limit)
-        rewrite_timeout_ms = max(self._hook_timeout_ms, DEFAULT_REWRITE_LLM_TIMEOUT_MS)
+        rewrite_timeout_ms = max(self._hook_timeout_ms, self._llm_rpc_timeout_ms)
         prompt = _render(
             self._rewrite_prompt_template,
             nickname=nickname,
@@ -1702,6 +1722,7 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         current_max = max_tokens
         collected: list[tuple[dict[str, Any], str]] = []
         result: dict[str, Any] = {"success": False, "response": ""}
+        compact_timeout_ms = max(self._hook_timeout_ms, self._llm_rpc_timeout_ms)
 
         for call_index in range(MAX_COMPACT_LENGTH_RETRIES + 1):
             result = await self.ctx.llm.generate(
@@ -1709,6 +1730,7 @@ class PlasticMemoryPlugin(MaiBotPlugin):
                 model=self._compact_model,
                 temperature=self._compact_temperature,
                 max_tokens=current_max,
+                timeout_ms=compact_timeout_ms,
             )
             content = _extract_compact_response(result)
             if result.get("success") and content:
