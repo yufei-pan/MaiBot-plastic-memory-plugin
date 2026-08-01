@@ -940,6 +940,18 @@ def _restore_shipped_config_template(plugin_dir: Path) -> bool:
     shutil.copy2(template_path, config_path)
     return True
 
+def _ensure_shipped_config_present(plugin_dir: Path) -> bool:
+    """若缺少运行期 ``config.toml``，从 ``config.default.toml`` 复制一份。
+
+    Host Runner 在 ``on_load`` 之前读取配置；必须在 ``create_plugin`` 阶段
+    落盘带注释的模板，否则会先写成无注释的模型默认值。
+    """
+    config_path = plugin_dir / "config.toml"
+    template_path = plugin_dir / SHIPPED_CONFIG_TEMPLATE_NAME
+    if config_path.exists() or not template_path.exists():
+        return False
+    shutil.copy2(template_path, config_path)
+    return True
 
 def _load_config_dict_from_disk(plugin_dir: Path) -> dict[str, Any] | None:
     config_path = plugin_dir / "config.toml"
@@ -1879,4 +1891,5 @@ class PlasticMemoryPlugin(MaiBotPlugin):
 
 def create_plugin() -> PlasticMemoryPlugin:
     """创建插件实例。"""
+    _ensure_shipped_config_present(Path(__file__).resolve().parent)
     return PlasticMemoryPlugin()

@@ -84,6 +84,26 @@ def test_restore_shipped_config_template() -> None:
     print("ok: bare config restored from shipped template")
 
 
+def test_ensure_shipped_config_present_when_missing() -> None:
+    """未随仓库分发 config.toml 时，create 前应从模板落盘运行期配置。"""
+    import tempfile
+
+    template_src = PLUGIN_DIR / "config.default.toml"
+    assert template_src.exists()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        plugin_dir = Path(tmp)
+        shutil.copy2(template_src, plugin_dir / plastic_plugin.SHIPPED_CONFIG_TEMPLATE_NAME)
+        assert not (plugin_dir / "config.toml").exists()
+        assert plastic_plugin._ensure_shipped_config_present(plugin_dir) is True
+        assert (plugin_dir / "config.toml").is_file()
+        # 已存在时不得覆盖用户配置
+        (plugin_dir / "config.toml").write_text("# keep me\n[plugin]\nenabled = false\n", encoding="utf-8")
+        assert plastic_plugin._ensure_shipped_config_present(plugin_dir) is False
+        assert "# keep me" in (plugin_dir / "config.toml").read_text(encoding="utf-8")
+    print("ok: missing config.toml seeded from config.default.toml")
+
+
 def test_version_upgrade_preserves_user_fields() -> None:
     """1.2.0 -> 1.3.0 升级应保留用户显式配置，仅 bump config_version。"""
     raw = _legacy_1_2_0_config()
@@ -306,11 +326,13 @@ def test_plugin_importable() -> None:
     assert default_config["memory"]["size_limit"] is None
     assert default_config["memory"]["injection_template"] == ""
 
-    config_data = tomllib.loads((PLUGIN_DIR / "config.toml").read_text(encoding="utf-8"))
+    shipped = PLUGIN_DIR / "config.default.toml"
+    assert shipped.is_file(), "缺少随仓库分发的 config.default.toml"
+    config_data = tomllib.loads(shipped.read_text(encoding="utf-8"))
     for section, fields in config_data.items():
-        assert section in default_config, f"config.toml 中存在未知配置节：{section}"
+        assert section in default_config, f"config.default.toml 中存在未知配置节：{section}"
         for field in fields:
-            assert field in default_config[section], f"config.toml 中存在未知字段：{section}.{field}"
+            assert field in default_config[section], f"config.default.toml 中存在未知字段：{section}.{field}"
     print("ok: plugin importable, config model consistent")
 
 
@@ -431,6 +453,7 @@ def main() -> None:
     test_compact_restores_when_file_cleared_during_llm()
     test_legacy_runtime_default_follows_code_not_file()
     test_restore_shipped_config_template()
+    test_ensure_shipped_config_present_when_missing()
     test_version_upgrade_preserves_user_fields()
     test_runner_save_path_preserves_content()
     test_none_values_never_persisted()
