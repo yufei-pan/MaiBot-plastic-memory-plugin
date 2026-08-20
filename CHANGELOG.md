@@ -5,6 +5,12 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.4.5] - 2026-08-19
+
+### 修复
+
+- 兼容 MaiBot 1.2.0 的 Item-first planner / replyer Hook 载荷，同时保留旧版 `messages` 载荷支持
+
 ## [0.4.4] - 2026-08-01
 
 ### 变更

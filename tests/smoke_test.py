@@ -386,6 +386,60 @@ def test_inject_continues_when_one_scope_read_fails() -> None:
     print("ok: inject continues with partial read success")
 
 
+def test_inject_supports_maibot_1_2_context_items() -> None:
+    """1.2 的 Item 载荷应实际插入记录，不能静默 continue。"""
+    import asyncio
+    import tempfile
+    from unittest.mock import AsyncMock, MagicMock
+
+    p = plastic_plugin.PlasticMemoryPlugin()
+    tmp = Path(tempfile.mkdtemp(prefix="pm-items-"))
+    global_store = plastic_plugin.NoteStore(tmp / "global.md")
+    global_store.write("全局自我回馈\n")
+    stream_store = plastic_plugin.NoteStore(tmp / "stream.md")
+    p._inject_when_empty = False
+    p._size_limit = 8192
+    p._per_chat_size_limit = 4096
+    p._global_store = global_store
+    p._get_chat_store = lambda _stream_id: stream_store
+    p._set_context(
+        MagicMock(
+            config=MagicMock(get=AsyncMock(return_value="麦麦")),
+            logger=MagicMock(),
+        )
+    )
+
+    system_item = {
+        "item_type": "SystemMessageItem",
+        "meta": {
+            "item_id": "system-1",
+            "logical_turn_id": None,
+            "timestamp": "2026-08-19T12:00:00-07:00",
+        },
+        "parts": [{"type": "text", "text": "system prompt"}],
+    }
+    result = asyncio.run(
+        p._inject(
+            {
+                "items": [system_item],
+                "item_schema_version": 1,
+                "session_id": "stream-1",
+            },
+            p._injection_template,
+        )
+    )
+
+    items = result["modified_kwargs"]["items"]
+    assert items[0] == system_item
+    assert items[1]["item_type"] == "UserMessageItem"
+    assert items[1]["meta"]["item_id"]
+    assert items[1]["meta"]["item_id"] != "system-1"
+    assert items[1]["meta"]["logical_turn_id"] is None
+    assert "全局自我回馈" in items[1]["parts"][0]["text"]
+    assert result["modified_kwargs"]["item_schema_version"] == 1
+    print("ok: inject supports MaiBot 1.2 context items")
+
+
 def test_compact_restores_when_file_cleared_during_llm() -> None:
     """压缩期间文件被清空时，应写入 LLM 压缩结果而非静默丢弃。"""
     import asyncio
@@ -450,6 +504,7 @@ def main() -> None:
     test_verbose_injection_templates_follow_new_default()
     test_build_rewrite_payload_excludes_scope_and_anchor()
     test_inject_continues_when_one_scope_read_fails()
+    test_inject_supports_maibot_1_2_context_items()
     test_compact_restores_when_file_cleared_during_llm()
     test_legacy_runtime_default_follows_code_not_file()
     test_restore_shipped_config_template()

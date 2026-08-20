@@ -15,9 +15,11 @@ import shutil
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from types import UnionType
 from typing import Any, Literal, Optional, Set, Union, get_args, get_origin
+from uuid import uuid4
 
 from maibot_sdk import Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.config import validate_plugin_config
@@ -105,6 +107,21 @@ SCOPE_TOOL_PARAM = ToolParameterInfo(
 
 # HookHandler 处理器的默认超时时间（毫秒）。可通过 config.toml 的 hook_timeout_ms 覆盖。
 DEFAULT_HOOK_TIMEOUT_MS = 60000
+CONTEXT_ITEM_SCHEMA_VERSION = 1
+
+
+def _new_user_context_item(text: str) -> dict[str, Any]:
+    """构造 MaiBot 1.2 Hook 可反序列化的 UserMessageItem。"""
+
+    return {
+        "item_type": "UserMessageItem",
+        "meta": {
+            "item_id": uuid4().hex,
+            "logical_turn_id": None,
+            "timestamp": datetime.now().astimezone().isoformat(),
+        },
+        "parts": [{"type": "text", "text": text}],
+    }
 
 # 后台 LLM（rewrite / compact）单次 cap.call 超时（毫秒）；实际取 max(此值, hook_timeout_ms)。
 DEFAULT_LLM_RPC_TIMEOUT_MS = 120000
@@ -1244,8 +1261,13 @@ class PlasticMemoryPlugin(MaiBotPlugin):
     async def _inject(self, kwargs: dict[str, Any], injection_template: str) -> dict[str, Any]:
         """把演化指令作为一条 user 消息插入到 system 之后。"""
         try:
+            items = kwargs.get("items")
+            use_context_items = (
+                isinstance(items, list)
+                and kwargs.get("item_schema_version") == CONTEXT_ITEM_SCHEMA_VERSION
+            )
             messages = kwargs.get("messages")
-            if not isinstance(messages, list):
+            if not use_context_items and not isinstance(messages, list):
                 return {"action": "continue"}
 
             global_note = ""
@@ -1303,14 +1325,25 @@ class PlasticMemoryPlugin(MaiBotPlugin):
                 stream_section=stream_section,
             )
 
-            # 找到最后一条 system 消息的位置，在其后插入
-            insert_at = 0
-            for index, item in enumerate(messages):
-                if isinstance(item, dict) and item.get("role") == "system":
-                    insert_at = index + 1
-            messages.insert(insert_at, {"role": "user", "content": block})
-
-            kwargs["messages"] = messages
+            if use_context_items:
+                new_items = list(items)
+                insert_at = 0
+                for index, item in enumerate(new_items):
+                    if isinstance(item, dict) and item.get("item_type") == "SystemMessageItem":
+                        insert_at = index + 1
+                new_items.insert(
+                    insert_at,
+                    _new_user_context_item(block),
+                )
+                kwargs["items"] = new_items
+            else:
+                # MaiBot 1.1 及更早版本的 PromptMessage 载荷。
+                insert_at = 0
+                for index, item in enumerate(messages):
+                    if isinstance(item, dict) and item.get("role") == "system":
+                        insert_at = index + 1
+                messages.insert(insert_at, {"role": "user", "content": block})
+                kwargs["messages"] = messages
             return {"action": "continue", "modified_kwargs": kwargs}
         except Exception as exc:  # 注入失败不应中断聊天主流程
             self.ctx.logger.warning("演化指令注入失败，已跳过: %s", exc, exc_info=True)
