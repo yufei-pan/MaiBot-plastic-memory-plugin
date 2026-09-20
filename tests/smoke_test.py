@@ -464,6 +464,87 @@ def test_compact_restores_when_file_cleared_during_llm() -> None:
     print("ok: compact restores when file cleared during llm")
 
 
+def test_resolve_llm_route_prefers_task_names() -> None:
+    assert plastic_plugin.resolve_llm_route("utils", ["utils", "planner", "replyer"]) == ("utils", None)
+    assert plastic_plugin.resolve_llm_route("planner", ["utils", "planner"]) == ("planner", None)
+    assert plastic_plugin.resolve_llm_route(" replyer ", ["replyer"]) == ("replyer", None)
+    print("ok: Host task names route to task_name")
+
+
+def test_resolve_llm_route_uses_model_name_when_not_a_task() -> None:
+    assert plastic_plugin.resolve_llm_route("step-5-preview", ["utils", "planner", "replyer"]) == (
+        None,
+        "step-5-preview",
+    )
+    print("ok: concrete model names route to model_name")
+
+
+def test_resolve_llm_route_listing_unavailable_falls_back_to_task() -> None:
+    assert plastic_plugin.resolve_llm_route("utils", None) == ("utils", None)
+    assert plastic_plugin.resolve_llm_route("utils", []) == ("utils", None)
+    assert plastic_plugin.resolve_llm_route("", ["utils"]) == (None, None)
+    print("ok: missing task list falls back to task_name")
+
+
+def _plastic_llm_plugin(configured: str, tasks: list[str] | None):
+    from types import SimpleNamespace
+
+    captured: list[dict[str, object]] = []
+
+    async def generate(**kwargs: object) -> dict[str, object]:
+        captured.append(dict(kwargs))
+        return {"success": True, "response": "ok"}
+
+    async def get_available_models() -> list[str]:
+        if tasks is None:
+            raise RuntimeError("listing failed")
+        return list(tasks)
+
+    inst = plastic_plugin.PlasticMemoryPlugin()
+    inst._set_context(
+        SimpleNamespace(
+            logger=SimpleNamespace(warning=lambda *_a, **_k: None),
+            llm=SimpleNamespace(generate=generate, get_available_models=get_available_models),
+        )
+    )
+    return inst, captured
+
+
+def test_llm_generate_uses_task_name_not_model() -> None:
+    import asyncio
+
+    inst, captured = _plastic_llm_plugin("replyer", ["utils", "planner", "replyer"])
+    asyncio.run(inst._llm_generate("hi", "replyer", temperature=0.3, max_tokens=100, timeout_ms=1000))
+    assert captured, "expected an llm.generate call"
+    kwargs = captured[0]
+    assert kwargs.get("task_name") == "replyer"
+    assert "model" not in kwargs
+    assert "model_name" not in kwargs
+    print("ok: plastic-memory LLM uses task_name, not model")
+
+
+def test_llm_generate_uses_model_name_for_concrete_model() -> None:
+    import asyncio
+
+    inst, captured = _plastic_llm_plugin("step-5-preview", ["utils", "planner", "replyer"])
+    asyncio.run(inst._llm_generate("hi", "step-5-preview"))
+    kwargs = captured[0]
+    assert kwargs.get("model_name") == "step-5-preview"
+    assert "task_name" not in kwargs
+    assert "model" not in kwargs
+    print("ok: plastic-memory LLM uses model_name for concrete models")
+
+
+def test_llm_generate_listing_failure_keeps_task_name() -> None:
+    import asyncio
+
+    inst, captured = _plastic_llm_plugin("utils", None)
+    asyncio.run(inst._llm_generate("hi", "utils"))
+    assert captured[0].get("task_name") == "utils"
+    assert "model_name" not in captured[0]
+    print("ok: plastic-memory LLM keeps task_name when listing fails")
+
+
 def test_instruction_write_feedback() -> None:
     """演化指令写入工具：空内容不得静默写入/清空，且容忍 instruction/note/text 别名。"""
     import asyncio
@@ -494,6 +575,12 @@ def test_instruction_write_feedback() -> None:
 def main() -> None:
     test_plugin_importable()
     test_instruction_write_feedback()
+    test_resolve_llm_route_prefers_task_names()
+    test_resolve_llm_route_uses_model_name_when_not_a_task()
+    test_resolve_llm_route_listing_unavailable_falls_back_to_task()
+    test_llm_generate_uses_task_name_not_model()
+    test_llm_generate_uses_model_name_for_concrete_model()
+    test_llm_generate_listing_failure_keeps_task_name()
     test_resolve_effective_defaults()
     test_legacy_compact_model_follows_replyer()
     test_resolve_rewrite_max_tokens_uses_size_limit_multiplier()

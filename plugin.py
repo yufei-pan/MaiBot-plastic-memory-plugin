@@ -13,7 +13,7 @@ import hashlib
 import re
 import shutil
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -794,6 +794,26 @@ def _effective_str(value: str | None, default: str, *, legacy: str | None = None
     return str(value).strip()
 
 
+def resolve_llm_route(
+    configured: str,
+    available_tasks: Sequence[str] | None,
+) -> tuple[str | None, str | None]:
+    """把配置值拆成 Host 的 ``task_name`` / ``model_name``。
+
+    命中 ``llm.get_available_models()`` 任务名则走 ``task_name``；否则走 ``model_name``。
+    列表不可用时按任务名，避免 SDK 2.8.1 把 ``utils``/``replyer`` 当成具体模型。
+    """
+    name = str(configured or "").strip()
+    if not name:
+        return None, None
+    tasks = {str(item).strip() for item in (available_tasks or []) if str(item).strip()}
+    if not tasks:
+        return name, None
+    if name in tasks:
+        return name, None
+    return None, name
+
+
 def _canonical_template(value: str) -> str:
     return str(value).replace("\r\n", "\n").strip()
 
@@ -1039,6 +1059,36 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         self._compact_prompt_template: str = DEFAULT_COMPACT_PROMPT_TEMPLATE
         self._note_file: str = DEFAULT_NOTE_FILE
         self._chat_note_folder_name: str = DEFAULT_PER_CHAT_NOTE_FOLDER
+
+    async def _llm_generate(
+        self,
+        prompt: str,
+        configured: str,
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """按配置调用 Host LLM：任务名走 ``task_name``，否则 ``model_name``。"""
+        available: list[str] | None
+        try:
+            raw = await self.ctx.llm.get_available_models()
+            available = list(raw) if raw else []
+        except Exception as exc:
+            self.ctx.logger.warning("获取 Host 模型任务列表失败，按任务名调用: %s", exc)
+            available = None
+        task_name, model_name = resolve_llm_route(configured, available)
+        kwargs: dict[str, Any] = {
+            "prompt": prompt,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "timeout_ms": timeout_ms,
+        }
+        if task_name:
+            kwargs["task_name"] = task_name
+        if model_name:
+            kwargs["model_name"] = model_name
+        return await self.ctx.llm.generate(**kwargs)
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -1398,9 +1448,9 @@ class PlasticMemoryPlugin(MaiBotPlugin):
 
         for attempt in range(1, self._max_rewrite_attempts + 1):
             try:
-                result = await self.ctx.llm.generate(
-                    prompt=prompt,
-                    model=self._rewrite_model,
+                result = await self._llm_generate(
+                    prompt,
+                    self._rewrite_model,
                     temperature=self._rewrite_temperature,
                     max_tokens=max_tokens,
                     timeout_ms=rewrite_timeout_ms,
@@ -1770,9 +1820,9 @@ class PlasticMemoryPlugin(MaiBotPlugin):
         compact_timeout_ms = max(self._hook_timeout_ms, self._llm_rpc_timeout_ms)
 
         for call_index in range(MAX_COMPACT_LENGTH_RETRIES + 1):
-            result = await self.ctx.llm.generate(
-                prompt=prompt,
-                model=self._compact_model,
+            result = await self._llm_generate(
+                prompt,
+                self._compact_model,
                 temperature=self._compact_temperature,
                 max_tokens=current_max,
                 timeout_ms=compact_timeout_ms,
